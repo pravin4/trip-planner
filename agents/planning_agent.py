@@ -210,6 +210,24 @@ class PlanningAgent:
                 day_plan["time_slots"] = [slot.__dict__ for slot in schedule.time_slots]
                 day_plan["schedule_validation"] = self.time_manager.validate_schedule(schedule)
             
+            # Add geographic validation to each day plan
+            for day_plan in day_plans:
+                validation = GeographicUtils.validate_day_plan_geography(day_plan)
+                day_plan["geographic_validation"] = validation
+                
+                # If there are geographic issues, add a warning note
+                if not validation.get("is_valid", True):
+                    issues = validation.get("issues", [])
+                    suggestions = validation.get("suggestions", [])
+                    
+                    warning_note = "⚠️ Geographic Warning: "
+                    if issues:
+                        warning_note += f"Found {len(issues)} geographic issues. "
+                    if suggestions:
+                        warning_note += " ".join(suggestions[:2])  # Limit to first 2 suggestions
+                    
+                    day_plan["notes"] = day_plan.get("notes", "") + " " + warning_note
+            
             # Validate the geographic logic
             validation = GeographicUtils.validate_itinerary_geography(day_plans)
             
@@ -499,13 +517,20 @@ class PlanningAgent:
                 destinations = []
                 parts = route.lower().split()
                 
+                # More sophisticated parsing for multi-destination routes
+                current_destination = []
                 for i, part in enumerate(parts):
                     if part in ["to", "via", "through"] and i > 0 and i < len(parts) - 1:
                         # Add the destination before the connector
-                        if i > 1:
-                            destinations.append(" ".join(parts[:i]))
-                        # Add the destination after the connector
-                        destinations.append(" ".join(parts[i+1:]))
+                        if current_destination:
+                            destinations.append(" ".join(current_destination))
+                            current_destination = []
+                    else:
+                        current_destination.append(part)
+                
+                # Add the final destination
+                if current_destination:
+                    destinations.append(" ".join(current_destination))
                 
                 # If no destinations found, use the original route
                 if not destinations:
@@ -514,7 +539,19 @@ class PlanningAgent:
                 return destinations
         
         # Default to single destination
-        return [preferences.get("destination", "Unknown")]
+        destination = preferences.get("destination", "Unknown")
+        
+        # Handle comma-separated destinations (e.g., "Big Sur, solvang")
+        if "," in destination:
+            # Split by comma and clean up
+            destinations = [dest.strip() for dest in destination.split(",")]
+            # If it looks like a single destination with descriptive text, keep as one
+            if len(destinations) == 2 and len(destinations[1]) < 20:
+                # This is likely a single destination with additional context
+                return [destination]
+            return destinations
+        
+        return [destination]
     
     def _plan_transportation(self, destination: str, activities: List[Dict[str, Any]]) -> List[str]:
         """Plan transportation between activities"""

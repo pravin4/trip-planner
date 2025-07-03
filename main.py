@@ -71,6 +71,57 @@ class SmartTravelPlanner:
             logger.error(f"Failed to initialize Smart Travel Planner: {e}")
             raise
     
+    def _parse_and_validate_destination(self, destination: str) -> Dict[str, Any]:
+        """
+        Parse and validate destination input to prevent geographic confusion.
+        
+        Args:
+            destination: Raw destination input from user
+            
+        Returns:
+            Dict with parsed destination info
+        """
+        # Handle common multi-destination patterns
+        if " to " in destination.lower():
+            # Route format: "San Jose to Big Sur"
+            parts = destination.split(" to ")
+            if len(parts) == 2:
+                return {
+                    "type": "route",
+                    "start": parts[0].strip(),
+                    "end": parts[1].strip(),
+                    "primary_destination": parts[1].strip(),  # Focus on end destination
+                    "route_description": destination
+                }
+        
+        # Handle comma-separated destinations
+        if "," in destination:
+            parts = [part.strip() for part in destination.split(",")]
+            if len(parts) == 2:
+                # Check if second part is descriptive or a separate destination
+                second_part = parts[1].lower()
+                if len(second_part) < 30 and not any(word in second_part for word in ["via", "through", "to"]):
+                    # Likely a single destination with context
+                    return {
+                        "type": "single",
+                        "primary_destination": destination,
+                        "parsed_destinations": [destination]
+                    }
+                else:
+                    # Multiple destinations
+                    return {
+                        "type": "multi",
+                        "primary_destination": parts[0],
+                        "parsed_destinations": parts
+                    }
+        
+        # Single destination
+        return {
+            "type": "single",
+            "primary_destination": destination,
+            "parsed_destinations": [destination]
+        }
+    
     def create_itinerary(self, 
                         destination: str,
                         start_date: str,

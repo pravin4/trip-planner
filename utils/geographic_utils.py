@@ -318,4 +318,73 @@ class GeographicUtils:
             "is_valid": len(issues) == 0,
             "issues": issues,
             "suggestions": suggestions
+        }
+
+    @staticmethod
+    def validate_day_plan_geography(day_plan: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate that activities in a day plan are geographically realistic.
+        
+        Args:
+            day_plan: Day plan dictionary with activities
+            
+        Returns:
+            Validation results with issues and suggestions
+        """
+        issues = []
+        suggestions = []
+        
+        activities = day_plan.get("activities", [])
+        if len(activities) < 2:
+            return {"is_valid": True, "issues": [], "suggestions": []}
+        
+        # Check distances between all activities
+        max_reasonable_distance = 50  # km - maximum reasonable distance for a day
+        total_distance = 0
+        
+        for i in range(len(activities) - 1):
+            loc1 = activities[i].get("location", {})
+            loc2 = activities[i + 1].get("location", {})
+            
+            if (loc1.get("latitude") and loc1.get("longitude") and 
+                loc2.get("latitude") and loc2.get("longitude")):
+                
+                distance = GeographicUtils.calculate_distance(
+                    loc1["latitude"], loc1["longitude"],
+                    loc2["latitude"], loc2["longitude"]
+                )
+                
+                total_distance += distance
+                
+                if distance > max_reasonable_distance:
+                    issues.append({
+                        "type": "unrealistic_distance",
+                        "activity1": activities[i].get("name", "Unknown"),
+                        "activity2": activities[i + 1].get("name", "Unknown"),
+                        "distance_km": round(distance, 1)
+                    })
+                    
+                    suggestions.append(
+                        f"Activities '{activities[i].get('name', 'Unknown')}' and "
+                        f"'{activities[i + 1].get('name', 'Unknown')}' are {round(distance, 1)}km apart. "
+                        f"This may not be realistic for a single day."
+                    )
+        
+        # Check if total travel distance is reasonable
+        if total_distance > 200:  # More than 200km total travel in a day
+            issues.append({
+                "type": "excessive_travel",
+                "total_distance_km": round(total_distance, 1)
+            })
+            
+            suggestions.append(
+                f"Total travel distance of {round(total_distance, 1)}km in one day may be excessive. "
+                f"Consider spreading activities across multiple days or focusing on a smaller geographic area."
+            )
+        
+        return {
+            "is_valid": len(issues) == 0,
+            "issues": issues,
+            "suggestions": suggestions,
+            "total_distance_km": round(total_distance, 1)
         } 
