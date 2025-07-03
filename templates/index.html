@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Travel Planner</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .main-container {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+        }
+        .form-control, .form-select {
+            border-radius: 10px;
+            border: 2px solid #e9ecef;
+            transition: all 0.3s ease;
+        }
+        .form-control:focus, .form-select:focus {
+            border-color: #667eea;
+            box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            border-radius: 10px;
+            padding: 12px 30px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+        .card {
+            border-radius: 15px;
+            border: none;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+        .loading {
+            display: none;
+        }
+        .result-section {
+            display: none;
+        }
+        .activity-checkbox, .accommodation-checkbox {
+            margin-right: 10px;
+        }
+        .section-title {
+            color: #667eea;
+            font-weight: 600;
+            margin-bottom: 20px;
+        }
+        .itinerary-day {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .cost-breakdown {
+            background: #e8f4fd;
+            border-radius: 10px;
+            padding: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container py-5">
+        <div class="row justify-content-center">
+            <div class="col-lg-10">
+                <div class="main-container p-5">
+                    <!-- Header -->
+                    <div class="text-center mb-5">
+                        <h1 class="display-4 fw-bold text-primary">
+                            <i class="fas fa-plane-departure me-3"></i>
+                            Smart Travel Planner
+                        </h1>
+                        <p class="lead text-muted">Plan your perfect trip with AI-powered recommendations</p>
+                    </div>
+
+                    <!-- Planning Form -->
+                    <form id="tripForm">
+                        <div class="row">
+                            <!-- Basic Information -->
+                            <div class="col-md-6 mb-4">
+                                <div class="card h-100">
+                                    <div class="card-body">
+                                        <h5 class="section-title">
+                                            <i class="fas fa-info-circle me-2"></i>Basic Information
+                                        </h5>
+                                        
+                                        <div class="mb-3">
+                                            <label for="startingPoint" class="form-label">Starting Point</label>
+                                            <input type="text" class="form-control" id="startingPoint" 
+                                                   placeholder="e.g., San Jose, CA" value="San Jose, CA" required>
+                                        </div>
+                                        
+                                        <div class="mb-3">
+                                            <label for="destination" class="form-label">Destination</label>
+                                            <input type="text" class="form-control" id="destination" 
+                                                   placeholder="e.g., Big Sur, CA" required>
+                                        </div>
+                                        
+                                        <div class="row">
+                                            <div class="col-6">
+                                                <label for="startDate" class="form-label">Start Date</label>
+                                                <input type="date" class="form-control" id="startDate" required>
+                                            </div>
+                                            <div class="col-6">
+                                                <label for="endDate" class="form-label">End Date</label>
+                                                <input type="date" class="form-control" id="endDate" required>
+                                            </div>
+                                        </div>
+                                        
+                                        <div class="row mt-3">
+                                            <div class="col-6">
+                                                <label for="budget" class="form-label">Budget ($)</label>
+                                                <input type="number" class="form-control" id="budget" 
+                                                       placeholder="1500" min="100" required>
+                                            </div>
+                                            <div class="col-6">
+                                                <label for="groupSize" class="form-label">Group Size</label>
+                                                <input type="number" class="form-control" id="groupSize" 
+                                                       placeholder="2" min="1" max="20" required>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Preferences -->
+                            <div class="col-md-6 mb-4">
+                                <div class="card h-100">
+                                    <div class="card-body">
+                                        <h5 class="section-title">
+                                            <i class="fas fa-cog me-2"></i>Preferences
+                                        </h5>
+                                        
+                                        <div class="mb-3">
+                                            <label class="form-label">Activity Types</label>
+                                            <div class="row">
+                                                <div class="col-6">
+                                                    <div class="form-check">
+                                                        <input class="form-check-input activity-checkbox" type="checkbox" value="cultural" id="cultural">
+                                                        <label class="form-check-label" for="cultural">Cultural</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input activity-checkbox" type="checkbox" value="outdoor" id="outdoor">
+                                                        <label class="form-check-label" for="outdoor">Outdoor</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input activity-checkbox" type="checkbox" value="adventure" id="adventure">
+                                                        <label class="form-check-label" for="adventure">Adventure</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input activity-checkbox" type="checkbox" value="relaxation" id="relaxation">
+                                                        <label class="form-check-label" for="relaxation">Relaxation</label>
+                                                    </div>
+                                                </div>
+                                                <div class="col-6">
+                                                    <div class="form-check">
+                                                        <input class="form-check-input activity-checkbox" type="checkbox" value="shopping" id="shopping">
+                                                        <label class="form-check-label" for="shopping">Shopping</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input activity-checkbox" type="checkbox" value="nightlife" id="nightlife">
+                                                        <label class="form-check-label" for="nightlife">Nightlife</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input activity-checkbox" type="checkbox" value="food" id="food">
+                                                        <label class="form-check-label" for="food">Food</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input activity-checkbox" type="checkbox" value="historical" id="historical">
+                                                        <label class="form-check-label" for="historical">Historical</label>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        
+                                        <div class="mb-3">
+                                            <label class="form-label">Accommodation Types</label>
+                                            <div class="row">
+                                                <div class="col-6">
+                                                    <div class="form-check">
+                                                        <input class="form-check-input accommodation-checkbox" type="checkbox" value="hotel" id="hotel">
+                                                        <label class="form-check-label" for="hotel">Hotel</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input accommodation-checkbox" type="checkbox" value="camping" id="camping">
+                                                        <label class="form-check-label" for="camping">Camping</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input accommodation-checkbox" type="checkbox" value="cabin" id="cabin">
+                                                        <label class="form-check-label" for="cabin">Cabin</label>
+                                                    </div>
+                                                </div>
+                                                <div class="col-6">
+                                                    <div class="form-check">
+                                                        <input class="form-check-input accommodation-checkbox" type="checkbox" value="hostel" id="hostel">
+                                                        <label class="form-check-label" for="hostel">Hostel</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input accommodation-checkbox" type="checkbox" value="glamping" id="glamping">
+                                                        <label class="form-check-label" for="glamping">Glamping</label>
+                                                    </div>
+                                                    <div class="form-check">
+                                                        <input class="form-check-input accommodation-checkbox" type="checkbox" value="resort" id="resort">
+                                                        <label class="form-check-label" for="resort">Resort</label>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        
+                                        <div class="mb-3">
+                                            <label for="budgetLevel" class="form-label">Budget Level</label>
+                                            <select class="form-select" id="budgetLevel">
+                                                <option value="budget">Budget</option>
+                                                <option value="moderate" selected>Moderate</option>
+                                                <option value="luxury">Luxury</option>
+                                            </select>
+                                        </div>
+                                        
+                                        <div class="form-check mb-3">
+                                            <input class="form-check-input" type="checkbox" id="children">
+                                            <label class="form-check-label" for="children">
+                                                Include children in planning
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Submit Button -->
+                        <div class="text-center">
+                            <button type="submit" class="btn btn-primary btn-lg">
+                                <i class="fas fa-magic me-2"></i>Plan My Trip
+                            </button>
+                        </div>
+                    </form>
+
+                    <!-- Loading Section -->
+                    <div class="loading text-center mt-5">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="mt-3 text-muted">Creating your perfect itinerary...</p>
+                    </div>
+
+                    <!-- Results Section -->
+                    <div class="result-section mt-5">
+                        <div class="card">
+                            <div class="card-body">
+                                <h3 class="text-success mb-4">
+                                    <i class="fas fa-check-circle me-2"></i>Your Itinerary is Ready!
+                                </h3>
+                                
+                                <div id="itinerarySummary"></div>
+                                
+                                <div class="row mt-4">
+                                    <div class="col-md-8">
+                                        <h5 class="section-title">
+                                            <i class="fas fa-calendar-alt me-2"></i>Daily Plans
+                                        </h5>
+                                        <div id="dailyPlans"></div>
+                                    </div>
+                                    
+                                    <div class="col-md-4">
+                                        <h5 class="section-title">
+                                            <i class="fas fa-dollar-sign me-2"></i>Cost Breakdown
+                                        </h5>
+                                        <div id="costBreakdown"></div>
+                                        
+                                        <h5 class="section-title mt-4">
+                                            <i class="fas fa-book me-2"></i>Travel Guide
+                                        </h5>
+                                        <div id="travelGuide"></div>
+                                    </div>
+                                </div>
+                                
+                                <div class="text-center mt-4">
+                                    <button class="btn btn-success" onclick="downloadPDF()">
+                                        <i class="fas fa-download me-2"></i>Download PDF
+                                    </button>
+                                    <button class="btn btn-outline-primary ms-2" onclick="resetForm()">
+                                        <i class="fas fa-redo me-2"></i>Plan Another Trip
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let currentItinerary = null;
+
+        // Set default dates
+        document.addEventListener('DOMContentLoaded', function() {
+            const today = new Date();
+            const tomorrow = new Date(today);
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            
+            const nextWeek = new Date(today);
+            nextWeek.setDate(nextWeek.getDate() + 7);
+            
+            document.getElementById('startDate').value = tomorrow.toISOString().split('T')[0];
+            document.getElementById('endDate').value = nextWeek.toISOString().split('T')[0];
+            
+            // Set default checkboxes
+            document.getElementById('cultural').checked = true;
+            document.getElementById('outdoor').checked = true;
+            document.getElementById('hotel').checked = true;
+        });
+
+        document.getElementById('tripForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            planTrip();
+        });
+
+        function planTrip() {
+            // Show loading
+            document.querySelector('.loading').style.display = 'block';
+            document.querySelector('.result-section').style.display = 'none';
+            
+            // Collect form data
+            const formData = {
+                starting_point: document.getElementById('startingPoint').value,
+                destination: document.getElementById('destination').value,
+                start_date: document.getElementById('startDate').value,
+                end_date: document.getElementById('endDate').value,
+                budget: parseFloat(document.getElementById('budget').value),
+                group_size: parseInt(document.getElementById('groupSize').value),
+                activity_types: getCheckedValues('activity-checkbox'),
+                accommodation_types: getCheckedValues('accommodation-checkbox'),
+                budget_level: document.getElementById('budgetLevel').value,
+                children: document.getElementById('children').checked,
+                dietary_restrictions: []
+            };
+            
+            // Send request
+            fetch('/plan', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(formData)
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.querySelector('.loading').style.display = 'none';
+                
+                if (data.success) {
+                    currentItinerary = data.itinerary;
+                    displayResults(data);
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            })
+            .catch(error => {
+                document.querySelector('.loading').style.display = 'none';
+                alert('Error: ' + error.message);
+            });
+        }
+
+        function getCheckedValues(className) {
+            const checkboxes = document.querySelectorAll('.' + className + ':checked');
+            return Array.from(checkboxes).map(cb => cb.value);
+        }
+
+        function displayResults(data) {
+            const itinerary = data.itinerary;
+            
+            // Display summary
+            const totalCost = itinerary.total_cost || 0;
+            const totalBudget = itinerary.total_budget || 0;
+            const dayCount = itinerary.day_plans && Array.isArray(itinerary.day_plans) ? itinerary.day_plans.length : 0;
+            const startingPoint = itinerary.starting_point || 'San Jose';
+            
+            // Get trip logistics info
+            const tripLogistics = itinerary.trip_logistics || {};
+            const departureInfo = tripLogistics.departure_info || {};
+            const returnInfo = tripLogistics.return_info || {};
+            
+            document.getElementById('itinerarySummary').innerHTML = `
+                <div class="row">
+                    <div class="col-md-2">
+                        <h6 class="text-muted">From</h6>
+                        <p class="fw-bold">${startingPoint}</p>
+                    </div>
+                    <div class="col-md-2">
+                        <h6 class="text-muted">To</h6>
+                        <p class="fw-bold">${itinerary.destination || 'Unknown'}</p>
+                    </div>
+                    <div class="col-md-2">
+                        <h6 class="text-muted">Duration</h6>
+                        <p class="fw-bold">${dayCount} days</p>
+                    </div>
+                    <div class="col-md-2">
+                        <h6 class="text-muted">Total Cost</h6>
+                        <p class="fw-bold text-success">$${totalCost.toFixed(2)}</p>
+                    </div>
+                    <div class="col-md-2">
+                        <h6 class="text-muted">Travel Cost</h6>
+                        <p class="fw-bold text-info">$${(tripLogistics.total_travel_cost || 0).toFixed(2)}</p>
+                    </div>
+                    <div class="col-md-2">
+                        <h6 class="text-muted">Budget Status</h6>
+                        <p class="fw-bold ${totalCost <= totalBudget ? 'text-success' : 'text-warning'}">
+                            ${totalCost <= totalBudget ? '✅ Within Budget' : '⚠️ Over Budget'}
+                        </p>
+                    </div>
+                </div>
+                
+                ${departureInfo.notes || returnInfo.notes ? `
+                <div class="row mt-3">
+                    <div class="col-12">
+                        <div class="alert alert-info">
+                            <strong>Trip Logistics:</strong><br>
+                            ${departureInfo.notes ? `<strong>Departure:</strong> ${departureInfo.notes}<br>` : ''}
+                            ${returnInfo.notes ? `<strong>Return:</strong> ${returnInfo.notes}` : ''}
+                        </div>
+                    </div>
+                </div>
+                ` : ''}
+            `;
+            
+            // Display daily plans
+            let dailyPlansHTML = '';
+            if (itinerary.day_plans && Array.isArray(itinerary.day_plans)) {
+                itinerary.day_plans.forEach((day, index) => {
+                    const activities = day.activities && Array.isArray(day.activities) 
+                        ? day.activities.map(act => act.name || act.title || 'Unknown Activity').join(', ')
+                        : 'Free time';
+                    
+                    const restaurants = day.restaurants && Array.isArray(day.restaurants)
+                        ? day.restaurants.map(rest => rest.name || rest.title || 'Unknown Restaurant').join(', ')
+                        : 'Flexible dining';
+                    
+                    const accommodations = day.accommodations && Array.isArray(day.accommodations)
+                        ? day.accommodations.map(acc => acc.name || acc.title || 'Unknown Accommodation').join(', ')
+                        : 'Accommodation to be arranged';
+                    
+                    const transportation = day.transportation && Array.isArray(day.transportation)
+                        ? day.transportation.join(', ')
+                        : 'Transportation to be arranged';
+                    
+                    const notes = day.notes || day.summary || '';
+                    
+                    const dayType = day.day_type || 'regular';
+                    const dayTitle = dayType === 'departure' ? 'Departure Day' : 
+                                   dayType === 'return' ? 'Return Day' : 
+                                   `Day ${index + 1}`;
+                    const dayClass = dayType === 'departure' ? 'border-primary' : 
+                                   dayType === 'return' ? 'border-warning' : 
+                                   'border rounded';
+                    
+                    dailyPlansHTML += `
+                        <div class="itinerary-day mb-3 p-3 ${dayClass}">
+                            <h6 class="fw-bold ${dayType === 'departure' ? 'text-primary' : dayType === 'return' ? 'text-warning' : ''}">
+                                ${dayTitle}: ${day.date || 'Date TBD'}
+                            </h6>
+                            <p><strong>Activities:</strong> ${activities}</p>
+                            <p><strong>Restaurants:</strong> ${restaurants}</p>
+                            <p><strong>Accommodations:</strong> ${accommodations}</p>
+                            <p><strong>Transportation:</strong> ${transportation}</p>
+                            ${notes ? `<small class="text-muted">${notes}</small>` : ''}
+                        </div>
+                    `;
+                });
+            } else {
+                dailyPlansHTML = '<p class="text-muted">No daily plans available</p>';
+            }
+            document.getElementById('dailyPlans').innerHTML = dailyPlansHTML;
+            
+            // Display cost breakdown
+            const breakdown = itinerary.cost_breakdown || {};
+            document.getElementById('costBreakdown').innerHTML = `
+                <div class="cost-breakdown">
+                    <p><strong>Accommodations:</strong> $${(breakdown.accommodations || 0).toFixed(2)}</p>
+                    <p><strong>Activities:</strong> $${(breakdown.activities || 0).toFixed(2)}</p>
+                    <p><strong>Restaurants:</strong> $${(breakdown.restaurants || 0).toFixed(2)}</p>
+                    <p><strong>Transportation:</strong> $${(breakdown.transportation || 0).toFixed(2)}</p>
+                    <p><strong>Miscellaneous:</strong> $${(breakdown.miscellaneous || 0).toFixed(2)}</p>
+                    <hr>
+                    <p class="fw-bold"><strong>Total:</strong> $${(breakdown.total || itinerary.total_cost || 0).toFixed(2)}</p>
+                </div>
+            `;
+            
+            // Display travel guide
+            if (data.travel_guide) {
+                document.getElementById('travelGuide').innerHTML = `
+                    <div class="small text-muted">
+                        ${data.travel_guide.substring(0, 300)}...
+                    </div>
+                `;
+            } else {
+                document.getElementById('travelGuide').innerHTML = `
+                    <div class="text-muted">No travel guide available</div>
+                `;
+            }
+            
+            // Show results
+            document.querySelector('.result-section').style.display = 'block';
+        }
+
+        function downloadPDF() {
+            if (!currentItinerary) {
+                alert('No itinerary to download');
+                return;
+            }
+            
+            fetch('/download_pdf', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({itinerary: currentItinerary})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('PDF generated successfully! Check the outputs folder.');
+                } else {
+                    alert('Error: ' + data.error);
+                }
+            })
+            .catch(error => {
+                alert('Error: ' + error.message);
+            });
+        }
+
+        function resetForm() {
+            document.getElementById('tripForm').reset();
+            document.querySelector('.result-section').style.display = 'none';
+            
+            // Reset to default dates
+            const today = new Date();
+            const tomorrow = new Date(today);
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            
+            const nextWeek = new Date(today);
+            nextWeek.setDate(nextWeek.getDate() + 7);
+            
+            document.getElementById('startDate').value = tomorrow.toISOString().split('T')[0];
+            document.getElementById('endDate').value = nextWeek.toISOString().split('T')[0];
+            
+            // Set default checkboxes
+            document.getElementById('cultural').checked = true;
+            document.getElementById('outdoor').checked = true;
+            document.getElementById('hotel').checked = true;
+        }
+    </script>
+</body>
+</html> 
