@@ -1,7 +1,7 @@
 """
-Booking.com API Integration
-Provides hotel availability and pricing as a fallback to Amadeus.
-Uses RapidAPI Booking.com endpoint.
+Hotels.com API Integration
+Alternative hotel availability and pricing API.
+Uses RapidAPI Hotels.com endpoint.
 """
 
 import os
@@ -20,20 +20,20 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-class BookingAPI:
-    """Booking.com API client for hotel availability and pricing."""
+class HotelsComAPI:
+    """Hotels.com API client for hotel availability and pricing."""
     
     def __init__(self):
         self.api_key = os.getenv("RAPIDAPI_KEY")
-        self.base_url = "https://booking-com.p.rapidapi.com/v1"
+        self.base_url = "https://hotels-com-provider.p.rapidapi.com/v1"
         
         if not self.api_key:
-            logger.warning("RapidAPI key not found. Set RAPIDAPI_KEY in .env for Booking.com integration")
+            logger.warning("RapidAPI key not found. Set RAPIDAPI_KEY in .env for Hotels.com integration")
         else:
-            logger.info("Booking.com API configured")
+            logger.info("Hotels.com API configured")
     
     def _make_request(self, endpoint: str, params: Dict[str, Any] = None) -> Optional[Dict]:
-        """Make request to Booking.com API via RapidAPI."""
+        """Make request to Hotels.com API via RapidAPI."""
         if not self.api_key:
             return None
         
@@ -41,7 +41,7 @@ class BookingAPI:
             url = f"{self.base_url}{endpoint}"
             headers = {
                 'X-RapidAPI-Key': self.api_key,
-                'X-RapidAPI-Host': 'booking-com.p.rapidapi.com'
+                'X-RapidAPI-Host': 'hotels-com-provider.p.rapidapi.com'
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=10)
@@ -49,7 +49,7 @@ class BookingAPI:
             return response.json()
             
         except requests.exceptions.RequestException as e:
-            logger.error(f"Booking.com API request failed: {e}")
+            logger.error(f"Hotels.com API request failed: {e}")
             return None
     
     def search_hotels(self, destination: str, check_in: date, check_out: date, 
@@ -69,7 +69,7 @@ class BookingAPI:
         """
         try:
             if not self.api_key:
-                return APIResponse(success=False, error="Booking.com API not configured")
+                return APIResponse(success=False, error="Hotels.com API not configured")
             
             # First, get destination ID
             dest_result = self._get_destination_id(destination)
@@ -78,16 +78,14 @@ class BookingAPI:
             
             # Search for hotels
             params = {
-                'dest_id': dest_result['dest_id'],
-                'search_type': 'city',
-                'arrival_date': check_in.strftime('%Y-%m-%d'),
-                'departure_date': check_out.strftime('%Y-%m-%d'),
-                'adults': adults,
-                'children': children,
+                'query': destination,
+                'checkin_date': check_in.strftime('%Y-%m-%d'),
+                'checkout_date': check_out.strftime('%Y-%m-%d'),
+                'adults_number': adults,
+                'children_number': children,
                 'room_number': '1',
-                'units': 'metric',
                 'currency': 'USD',
-                'locale': 'en-us'
+                'locale': 'en_US'
             }
             
             data = self._make_request('/hotels/search', params)
@@ -95,28 +93,30 @@ class BookingAPI:
                 return APIResponse(success=False, error="Failed to fetch hotel data")
             
             hotels = []
-            for hotel in data.get('result', []):
-                hotel_info = {
-                    'name': hotel.get('hotel_name', 'Unknown'),
-                    'hotel_id': hotel.get('hotel_id'),
+            for hotel in data.get('searchResults', {}).get('results', []):
+                hotel_info = hotel.get('property', {})
+                price_info = hotel.get('ratePlan', {}).get('price', {})
+                
+                hotel_data = {
+                    'name': hotel_info.get('name', 'Unknown'),
+                    'hotel_id': hotel_info.get('id'),
                     'location': {
-                        'latitude': hotel.get('latitude'),
-                        'longitude': hotel.get('longitude'),
-                        'address': hotel.get('address', ''),
-                        'city': hotel.get('city', ''),
-                        'country': hotel.get('country', '')
+                        'latitude': hotel_info.get('mapMarker', {}).get('lat'),
+                        'longitude': hotel_info.get('mapMarker', {}).get('lng'),
+                        'address': hotel_info.get('address', {}).get('streetAddress', ''),
+                        'city': hotel_info.get('address', {}).get('locality', ''),
+                        'country': hotel_info.get('address', {}).get('countryName', '')
                     },
-                    'rating': hotel.get('review_score', 0),
+                    'rating': hotel_info.get('starRating', 0),
                     'price_range': {
-                        'min_price': hotel.get('min_total_price', 0),
-                        'max_price': hotel.get('max_total_price', 0),
-                        'currency': 'USD',
+                        'min_price': price_info.get('current', {}).get('plain', 0),
+                        'currency': price_info.get('current', {}).get('currencyInfo', {}).get('code', 'USD'),
                         'available': True
                     },
-                    'amenities': hotel.get('hotel_include_breakfast', False),
+                    'amenities': hotel_info.get('amenities', []),
                     'available': True
                 }
-                hotels.append(hotel_info)
+                hotels.append(hotel_data)
             
             return APIResponse(
                 success=True,
@@ -134,24 +134,24 @@ class BookingAPI:
             return APIResponse(success=False, error=str(e))
     
     def _get_destination_id(self, destination: str) -> Optional[Dict[str, Any]]:
-        """Get destination ID for Booking.com API."""
+        """Get destination ID for Hotels.com API."""
         try:
             params = {
-                'name': destination,
-                'locale': 'en-us'
+                'query': destination,
+                'locale': 'en_US'
             }
             
-            data = self._make_request('/hotels/locations', params)
+            data = self._make_request('/destinations/search', params)
             if not data:
                 return None
             
             # Return the first result
-            results = data.get('result', [])
+            results = data.get('suggestions', [])
             if results:
                 return {
-                    'dest_id': results[0].get('dest_id'),
-                    'name': results[0].get('name'),
-                    'type': results[0].get('dest_type')
+                    'dest_id': results[0].get('destinationId'),
+                    'name': results[0].get('names', {}).get('displayName', {}).get('text'),
+                    'type': 'destination'
                 }
             
             return None
@@ -163,9 +163,9 @@ class BookingAPI:
 
 # Example usage and testing
 if __name__ == "__main__":
-    api = BookingAPI()
+    api = HotelsComAPI()
     
-    print("Testing Booking.com API...")
+    print("Testing Hotels.com API...")
     
     # Test hotel search
     result = api.search_hotels("San Francisco", date(2025, 7, 4), date(2025, 7, 6), 2)

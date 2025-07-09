@@ -55,12 +55,15 @@ DEFAULT_GROUP_SIZE=2
 DEFAULT_TRIP_DURATION=7
 
 # Amadeus API Configuration (Choose one environment)
-AMADEUS_ENVIRONMENT=sandbox  # or "production"
+AMADEUS_ENVIRONMENT=production  # or "sandbox"
 
 # Sandbox credentials (for testing/development - free tier)
-AMADEUS_SANDBOX_CLIENT_ID=your_sandbox_client_id_here
-AMADEUS_SANDBOX_CLIENT_SECRET=your_sandbox_client_secret_here
+AMADEUS_SANDBOX_CLIENT_ID=your_sandbox_client_id
+AMADEUS_SANDBOX_CLIENT_SECRET=your_sandbox_client_secret
 
 # Production credentials (for real users - paid tier)
-AMADEUS_PRODUCTION_CLIENT_ID=your_production_client_id_here
-AMADEUS_PRODUCTION_CLIENT_SECRET=your_production_client_secret_here 
+AMADEUS_PRODUCTION_CLIENT_ID=your_production_client_id
+AMADEUS_PRODUCTION_CLIENT_SECRET=your_production_client_secret
+
+# RapidAPI Key (Required for Booking.com hotel availability)
+RAPIDAPI_KEY=your_rapidapi_key_here 

@@ -8,11 +8,12 @@ import os
 import logging
 import argparse
 from datetime import date
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from dotenv import load_dotenv
 
 from agents.research_agent import ResearchAgent
 from agents.planning_agent import PlanningAgent
+from agents.journey_agent import JourneyAgent
 from models.travel_models import (
     TravelPreferences, TravelRequest, Itinerary,
     AccommodationType, ActivityType, BudgetLevel
@@ -23,8 +24,12 @@ from api_integrations.wikivoyage_api import WikivoyageAPI
 from api_integrations.google_places import GooglePlacesAPI
 from api_integrations.yelp_api import YelpAPI
 from api_integrations.amadeus_api import AmadeusAPI
+from api_integrations.booking_api import BookingAPI
+from api_integrations.hotels_com_api import HotelsComAPI
+from api_integrations.google_hotels_api import GoogleHotelsAPI
 from utils.data_quality_manager import DataQualityManager
 from utils.geocoding_service import GeocodingService
+from utils.trip_logistics_planner import TripLogisticsPlanner
 
 # Load environment variables
 load_dotenv()
@@ -48,6 +53,7 @@ class SmartTravelPlanner:
             # Initialize agents
             self.research_agent = ResearchAgent()
             self.planning_agent = PlanningAgent()
+            self.journey_agent = JourneyAgent()
             
             # Initialize utilities
             self.pdf_generator = PDFGenerator()
@@ -58,6 +64,9 @@ class SmartTravelPlanner:
             self.yelp = YelpAPI()
             self.wikivoyage = WikivoyageAPI()
             self.amadeus = AmadeusAPI()
+            self.booking = BookingAPI()
+            self.hotels_com = HotelsComAPI()
+            self.google_hotels = GoogleHotelsAPI()
             
             # Initialize Data Quality Manager
             self.data_quality_manager = DataQualityManager()
@@ -65,18 +74,22 @@ class SmartTravelPlanner:
             # Initialize Geocoding Service
             self.geocoding_service = GeocodingService()
             
+            # Initialize Trip Logistics Planner
+            self.trip_logistics_planner = TripLogisticsPlanner()
+            
             logger.info("Smart Travel Planner initialized successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize Smart Travel Planner: {e}")
             raise
     
-    def _parse_and_validate_destination(self, destination: str) -> Dict[str, Any]:
+    def _parse_and_validate_destination(self, destination: str, starting_point: str = "San Jose") -> Dict[str, Any]:
         """
         Parse and validate destination input to prevent geographic confusion.
         
         Args:
             destination: Raw destination input from user
+            starting_point: Starting location (default: "San Jose")
             
         Returns:
             Dict with parsed destination info
@@ -93,6 +106,47 @@ class SmartTravelPlanner:
                     "primary_destination": parts[1].strip(),  # Focus on end destination
                     "route_description": destination
                 }
+        
+        # Check if destination contains route indicators
+        route_indicators = [" to ", " → ", " -> ", " via ", " through "]
+        for indicator in route_indicators:
+            if indicator in destination.lower():
+                parts = destination.split(indicator)
+                if len(parts) == 2:
+                    return {
+                        "type": "route",
+                        "start": parts[0].strip(),
+                        "end": parts[1].strip(),
+                        "primary_destination": parts[1].strip(),
+                        "route_description": destination
+                    }
+        
+        # Check if this looks like a route from starting_point to destination
+        # If starting_point is different from destination and destination doesn't contain starting_point
+        if (starting_point.lower() not in destination.lower() and 
+            destination.lower() not in starting_point.lower() and
+            starting_point != "San Jose"):  # Only if starting_point was explicitly set
+            # This might be a route from starting_point to destination
+            return {
+                "type": "route",
+                "start": starting_point,
+                "end": destination,
+                "primary_destination": destination,
+                "route_description": f"{starting_point} to {destination}"
+            }
+        
+        # More aggressive route detection: if starting_point and destination are different cities
+        # and starting_point is not the default "San Jose", treat as route
+        if (starting_point != "San Jose" and 
+            starting_point.lower() != destination.lower() and
+            not any(city in destination.lower() for city in starting_point.lower().split())):
+            return {
+                "type": "route",
+                "start": starting_point,
+                "end": destination,
+                "primary_destination": destination,
+                "route_description": f"{starting_point} to {destination}"
+            }
         
         # Handle comma-separated destinations
         if "," in destination:
@@ -153,10 +207,49 @@ class SmartTravelPlanner:
             # Create travel preferences
             travel_prefs = self._create_travel_preferences(preferences or {})
             
-            # Step 1: Plan departure/arrival logistics
-            logger.info("Step 1: Planning departure/arrival logistics...")
-            trip_logistics = self._plan_trip_logistics(
-                starting_point, destination, start_date, end_date, travel_prefs.model_dump()
+            # Parse destination to check if it's a route
+            destination_info = self._parse_and_validate_destination(destination, starting_point)
+            
+            # Step 1: Plan the journey (road trip, flights, etc.)
+            logger.info("Step 1: Planning journey...")
+            journey_plan = None
+            
+            if destination_info["type"] == "route":
+                # This is a route (e.g., "San Jose to Big Sur")
+                journey_plan = self.journey_agent.plan_journey(
+                    origin=destination_info["start"],
+                    destination=destination_info["end"],
+                    start_date=start_date,
+                    end_date=end_date,
+                    preferences=travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs)
+                )
+                logger.info(f"Journey planned: {journey_plan.get('travel_mode', 'unknown')} mode, {journey_plan.get('total_distance', 0):.1f} km")
+            
+            # Plan trip logistics with route optimization
+            trip_logistics_planner = TripLogisticsPlanner()
+            
+            # Extract destinations for route optimization
+            destinations = self._extract_destinations_from_preferences(travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs))
+            
+            # Optimize the route if multiple destinations
+            if len(destinations) > 1:
+                optimized_route = trip_logistics_planner.optimize_multi_destination_route(
+                    starting_point, destinations, travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs)
+                )
+                
+                # Update preferences with optimized route
+                travel_prefs_dict = travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs)
+                travel_prefs_dict["optimized_route"] = optimized_route
+                travel_prefs_dict["route_notes"] = optimized_route.get("optimization_notes", "")
+                
+                # Use the optimized route for logistics planning
+                main_destination = optimized_route["route"][1] if len(optimized_route["route"]) > 1 else destinations[0]
+            else:
+                main_destination = destinations[0] if destinations else "Unknown"
+            
+            # Plan logistics using the optimized route
+            trip_logistics = trip_logistics_planner.plan_complete_trip(
+                starting_point, main_destination, start_date, end_date, travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs)
             )
             
             # Step 2: Research the destination
@@ -177,7 +270,7 @@ class SmartTravelPlanner:
             )
             
             # Step 4: Add departure/arrival logistics to itinerary
-            itinerary = self._add_trip_logistics_to_itinerary(itinerary, trip_logistics, starting_point)
+            itinerary = self._add_trip_logistics_to_itinerary(itinerary, trip_logistics, starting_point, journey_plan)
             
             # Step 5: Apply data quality improvements
             itinerary = self.data_quality_manager.improve_itinerary_quality(itinerary, travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs))
@@ -283,7 +376,7 @@ class SmartTravelPlanner:
             basic_prefs = TravelPreferences()
             
             # Research the destination
-            research_results = self.research_agent.research_destination(destination, basic_prefs.dict())
+            research_results = self.research_agent.research_destination(destination, basic_prefs.model_dump())
             
             if research_results.get("research_complete", False):
                 return {
@@ -336,6 +429,7 @@ class SmartTravelPlanner:
                                 check_out: date, adults: int = 2) -> Dict[str, Any]:
         """
         Check real hotel availability and pricing for specific dates.
+        Tries multiple APIs in sequence: Amadeus → Booking.com → Hotels.com
         
         Args:
             destination: Destination city name
@@ -347,13 +441,69 @@ class SmartTravelPlanner:
             Dictionary with availability data
         """
         try:
+            # Try Amadeus API first (best for real pricing)
+            amadeus_result = self._check_amadeus_availability(destination, check_in, check_out, adults)
+            if amadeus_result["success"] and amadeus_result["total_available"] > 0:
+                amadeus_result["source"] = "Amadeus API"
+                return amadeus_result
+            
+            # Try Booking.com API second
+            logger.info("Amadeus returned no data, trying Booking.com API...")
+            booking_result = self._check_booking_availability(destination, check_in, check_out, adults)
+            if booking_result["success"] and booking_result["total_available"] > 0:
+                booking_result["source"] = "Booking.com API"
+                return booking_result
+            
+            # Try Hotels.com API third
+            logger.info("Booking.com returned no data, trying Hotels.com API...")
+            hotels_result = self._check_hotels_com_availability(destination, check_in, check_out, adults)
+            if hotels_result["success"] and hotels_result["total_available"] > 0:
+                hotels_result["source"] = "Hotels.com API"
+                return hotels_result
+            
+            # Try Google Hotels API fourth
+            logger.info("Hotels.com returned no data, trying Google Hotels API...")
+            google_result = self._check_google_hotels_availability(destination, check_in, check_out, adults)
+            if google_result["success"] and google_result["total_available"] > 0:
+                google_result["source"] = "Google Hotels API"
+                return google_result
+            
+            # If all APIs fail, return empty results with detailed error info
+            return {
+                "success": False,
+                "error": "No hotel availability data available from any API",
+                "data": [],
+                "source": "None",
+                "api_status": {
+                    "amadeus": amadeus_result.get("error", "Not configured"),
+                    "booking": booking_result.get("error", "Not configured"), 
+                    "hotels_com": hotels_result.get("error", "Not configured"),
+                    "google_hotels": google_result.get("error", "Not configured")
+                },
+                "recommendation": "Add API keys to .env file for real hotel data"
+            }
+                
+        except Exception as e:
+            logger.error(f"Error checking hotel availability: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "data": [],
+                "source": "Error"
+            }
+    
+    def _check_amadeus_availability(self, destination: str, check_in: date, 
+                                   check_out: date, adults: int) -> Dict[str, Any]:
+        """Check hotel availability using Amadeus API."""
+        try:
             # Get city code for Amadeus API
             city_code = self.amadeus.get_city_code(destination)
             if not city_code:
                 return {
                     "success": False,
                     "error": f"Could not find city code for {destination}",
-                    "data": []
+                    "data": [],
+                    "total_available": 0
                 }
             
             # Search for available hotels with real pricing
@@ -378,15 +528,134 @@ class SmartTravelPlanner:
                 return {
                     "success": False,
                     "error": result.error,
-                    "data": []
+                    "data": [],
+                    "total_available": 0
                 }
                 
         except Exception as e:
-            logger.error(f"Error checking hotel availability: {e}")
+            logger.error(f"Error checking Amadeus availability: {e}")
             return {
                 "success": False,
                 "error": str(e),
-                "data": []
+                "data": [],
+                "total_available": 0
+            }
+    
+    def _check_booking_availability(self, destination: str, check_in: date, 
+                                   check_out: date, adults: int) -> Dict[str, Any]:
+        """Check hotel availability using Booking.com API."""
+        try:
+            # Search for available hotels
+            result = self.booking.search_hotels(destination, check_in, check_out, adults)
+            
+            if result.success:
+                # Filter for available hotels with pricing
+                available_hotels = [
+                    hotel for hotel in result.data 
+                    if hotel.get('available', False) and hotel.get('price_range', {}).get('min_price', 0) > 0
+                ]
+                
+                return {
+                    "success": True,
+                    "data": available_hotels,
+                    "total_available": len(available_hotels),
+                    "destination": destination,
+                    "check_in": check_in.isoformat(),
+                    "check_out": check_out.isoformat()
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": result.error,
+                    "data": [],
+                    "total_available": 0
+                }
+                
+        except Exception as e:
+            logger.error(f"Error checking Booking.com availability: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "data": [],
+                "total_available": 0
+            }
+    
+    def _check_hotels_com_availability(self, destination: str, check_in: date, 
+                                      check_out: date, adults: int) -> Dict[str, Any]:
+        """Check hotel availability using Hotels.com API."""
+        try:
+            # Search for available hotels
+            result = self.hotels_com.search_hotels(destination, check_in, check_out, adults)
+            
+            if result.success:
+                # Filter for available hotels with pricing
+                available_hotels = [
+                    hotel for hotel in result.data 
+                    if hotel.get('available', False) and hotel.get('price_range', {}).get('min_price', 0) > 0
+                ]
+                
+                return {
+                    "success": True,
+                    "data": available_hotels,
+                    "total_available": len(available_hotels),
+                    "destination": destination,
+                    "check_in": check_in.isoformat(),
+                    "check_out": check_out.isoformat()
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": result.error,
+                    "data": [],
+                    "total_available": 0
+                }
+                
+        except Exception as e:
+            logger.error(f"Error checking Hotels.com availability: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "data": [],
+                "total_available": 0
+            }
+    
+    def _check_google_hotels_availability(self, destination: str, check_in: date, 
+                                          check_out: date, adults: int) -> Dict[str, Any]:
+        """Check hotel availability using Google Hotels API."""
+        try:
+            # Search for available hotels
+            result = self.google_hotels.search_hotels(destination, check_in, check_out, adults)
+            
+            if result.success:
+                # Filter for available hotels with pricing
+                available_hotels = [
+                    hotel for hotel in result.data 
+                    if hotel.get('available', False) and hotel.get('price_range', {}).get('min_price', 0) > 0
+                ]
+                
+                return {
+                    "success": True,
+                    "data": available_hotels,
+                    "total_available": len(available_hotels),
+                    "destination": destination,
+                    "check_in": check_in.isoformat(),
+                    "check_out": check_out.isoformat()
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": result.error,
+                    "data": [],
+                    "total_available": 0
+                }
+                
+        except Exception as e:
+            logger.error(f"Error checking Google Hotels availability: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "data": [],
+                "total_available": 0
             }
     
     def get_yelp_restaurants(self, destination: str, cuisine: str = None, 
@@ -430,184 +699,185 @@ class SmartTravelPlanner:
                 "restaurants": []
             }
     
-    def _plan_trip_logistics(self, starting_point: str, destination: str, 
-                           start_date: str, end_date: str, preferences: Dict[str, Any]) -> Dict[str, Any]:
-        """Plan departure and arrival logistics for the trip."""
-        try:
-            # Extract main destination from multi-destination string
-            main_destination = destination.split(",")[0].strip() if "," in destination else destination
-            
-            # Calculate distances and plan transportation
-            departure_info = self._plan_departure_leg(starting_point, main_destination, preferences)
-            return_info = self._plan_return_leg(main_destination, starting_point, preferences)
-            
-            # Calculate totals
-            total_travel_time = 0.0
-            total_travel_cost = 0.0
-            
-            if departure_info:
-                total_travel_time += departure_info.get("duration_hours", 0)
-                total_travel_cost += departure_info.get("cost_per_person", 0)
-            
-            if return_info:
-                total_travel_time += return_info.get("duration_hours", 0)
-                total_travel_cost += return_info.get("cost_per_person", 0)
-            
-            # Multiply by group size
-            group_size = preferences.get("group_size", 1)
-            total_travel_cost *= group_size
-            
-            return {
-                "starting_point": starting_point,
-                "destination": destination,
-                "departure_info": departure_info,
-                "return_info": return_info,
-                "total_travel_time_hours": total_travel_time,
-                "total_travel_cost": total_travel_cost,
-                "travel_days": [start_date, end_date]
-            }
-            
-        except Exception as e:
-            logger.error(f"Error planning trip logistics: {e}")
-            return {}
-    
-    def _plan_departure_leg(self, starting_point: str, destination: str, 
-                           preferences: Dict[str, Any]) -> Dict[str, Any]:
-        """Plan the departure leg from starting point to destination."""
-        try:
-            # Get coordinates (simplified - in production, use proper geocoding)
-            start_coords = self._get_coordinates(starting_point)
-            dest_coords = self._get_coordinates(destination)
-            
-            if not start_coords or not dest_coords:
-                return {}
-            
-            # Calculate distance
-            distance = self._calculate_distance(start_coords, dest_coords)
-            
-            # Select transportation mode
-            mode = self._select_transportation_mode(distance, preferences)
-            
-            # Calculate duration and cost
-            duration_hours = self._calculate_duration(distance, mode)
-            cost_per_person = self._calculate_cost(distance, mode, preferences)
-            
-            # Set departure and arrival times
-            departure_time = "09:00"  # Default morning departure
-            arrival_time = self._calculate_arrival_time(departure_time, duration_hours)
-            
-            # Generate notes
-            notes = self._generate_departure_notes(starting_point, destination, mode, distance)
-            
-            return {
-                "from": starting_point,
-                "to": destination,
-                "departure_time": departure_time,
-                "arrival_time": arrival_time,
-                "duration_hours": duration_hours,
-                "distance_km": distance,
-                "mode": mode,
-                "cost_per_person": cost_per_person,
-                "notes": notes
-            }
-            
-        except Exception as e:
-            logger.error(f"Error planning departure leg: {e}")
-            return {}
-    
-    def _plan_return_leg(self, destination: str, starting_point: str, 
-                        preferences: Dict[str, Any]) -> Dict[str, Any]:
-        """Plan the return leg from destination to starting point."""
-        try:
-            # Get coordinates
-            dest_coords = self._get_coordinates(destination)
-            start_coords = self._get_coordinates(starting_point)
-            
-            if not dest_coords or not start_coords:
-                return {}
-            
-            # Calculate distance
-            distance = self._calculate_distance(dest_coords, start_coords)
-            
-            # Select transportation mode
-            mode = self._select_transportation_mode(distance, preferences)
-            
-            # Calculate duration and cost
-            duration_hours = self._calculate_duration(distance, mode)
-            cost_per_person = self._calculate_cost(distance, mode, preferences)
-            
-            # Set departure and arrival times (afternoon return)
-            departure_time = "15:00"  # Default afternoon departure
-            arrival_time = self._calculate_arrival_time(departure_time, duration_hours)
-            
-            # Generate notes
-            notes = self._generate_return_notes(destination, starting_point, mode, distance)
-            
-            return {
-                "from": destination,
-                "to": starting_point,
-                "departure_time": departure_time,
-                "arrival_time": arrival_time,
-                "duration_hours": duration_hours,
-                "distance_km": distance,
-                "mode": mode,
-                "cost_per_person": cost_per_person,
-                "notes": notes
-            }
-            
-        except Exception as e:
-            logger.error(f"Error planning return leg: {e}")
-            return {}
+    def _extract_destinations_from_preferences(self, preferences: Dict[str, Any]) -> List[str]:
+        """Extract destinations from travel preferences."""
+        destinations = []
+        if isinstance(preferences.get("parsed_destinations"), list):
+            destinations.extend(preferences["parsed_destinations"])
+        elif isinstance(preferences.get("primary_destination"), str):
+            destinations.append(preferences["primary_destination"])
+        return destinations
     
     def _add_trip_logistics_to_itinerary(self, itinerary: Dict[str, Any], 
-                                       trip_logistics: Dict[str, Any], 
-                                       starting_point: str) -> Dict[str, Any]:
-        """Add departure/arrival logistics to the itinerary."""
+                                       trip_logistics: Any, 
+                                       starting_point: str,
+                                       journey_plan: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Add departure/arrival logistics and journey planning to the itinerary."""
         try:
+            # Convert TripLogistics object to dict if needed
+            if hasattr(trip_logistics, 'departure_leg'):
+                # It's a TripLogistics object
+                logistics_dict = {
+                    "departure_info": {
+                        "from": trip_logistics.departure_leg.from_location if trip_logistics.departure_leg else starting_point,
+                        "to": trip_logistics.departure_leg.to_location if trip_logistics.departure_leg else "Unknown",
+                        "departure_time": trip_logistics.departure_leg.departure_time if trip_logistics.departure_leg else "09:00",
+                        "arrival_time": trip_logistics.departure_leg.arrival_time if trip_logistics.departure_leg else "Unknown",
+                        "duration": trip_logistics.departure_leg.duration_hours if trip_logistics.departure_leg else 0,
+                        "mode": trip_logistics.departure_leg.mode if trip_logistics.departure_leg else "car",
+                        "cost": trip_logistics.departure_leg.cost_per_person if trip_logistics.departure_leg else 0,
+                        "notes": trip_logistics.departure_leg.notes if trip_logistics.departure_leg else ""
+                    },
+                    "return_info": {
+                        "from": trip_logistics.return_leg.from_location if trip_logistics.return_leg else "Unknown",
+                        "to": trip_logistics.return_leg.to_location if trip_logistics.return_leg else starting_point,
+                        "departure_time": trip_logistics.return_leg.departure_time if trip_logistics.return_leg else "16:00",
+                        "arrival_time": trip_logistics.return_leg.arrival_time if trip_logistics.return_leg else "Unknown",
+                        "duration": trip_logistics.return_leg.duration_hours if trip_logistics.return_leg else 0,
+                        "mode": trip_logistics.return_leg.mode if trip_logistics.return_leg else "car",
+                        "cost": trip_logistics.return_leg.cost_per_person if trip_logistics.return_leg else 0,
+                        "notes": trip_logistics.return_leg.notes if trip_logistics.return_leg else ""
+                    },
+                    "total_travel_time": trip_logistics.total_travel_time,
+                    "total_travel_cost": trip_logistics.total_travel_cost,
+                    "travel_days": trip_logistics.travel_days or [],
+                    "starting_point": trip_logistics.starting_point,
+                    "destination": trip_logistics.destination
+                }
+            else:
+                # It's already a dict
+                logistics_dict = trip_logistics
+            
             # Add trip logistics to itinerary
-            itinerary["trip_logistics"] = trip_logistics
+            itinerary["trip_logistics"] = logistics_dict
             itinerary["starting_point"] = starting_point
             
+            # Add journey plan if available
+            if journey_plan:
+                itinerary["journey_plan"] = journey_plan
+                
+                # Add journey stops to the itinerary
+                if journey_plan.get("stops"):
+                    self._add_journey_stops_to_itinerary(itinerary, journey_plan["stops"])
+                
+                # Add journey costs to total
+                if journey_plan.get("total_cost"):
+                    itinerary["total_cost"] += journey_plan["total_cost"]
+                    
+                    # Update cost breakdown
+                    if "cost_breakdown" in itinerary:
+                        journey_costs = journey_plan.get("costs", {})
+                        for cost_type, amount in journey_costs.items():
+                            if cost_type in itinerary["cost_breakdown"]:
+                                itinerary["cost_breakdown"][cost_type] += amount
+                            else:
+                                itinerary["cost_breakdown"][cost_type] = amount
+                        
+                        itinerary["cost_breakdown"]["total"] = sum(
+                            v for k, v in itinerary["cost_breakdown"].items() if k != "total"
+                        )
+            
             # Add departure/arrival costs to total cost
-            if trip_logistics.get("total_travel_cost"):
-                itinerary["total_cost"] += trip_logistics["total_travel_cost"]
+            if logistics_dict.get("total_travel_cost"):
+                itinerary["total_cost"] += logistics_dict["total_travel_cost"]
                 
                 # Update cost breakdown
                 if "cost_breakdown" in itinerary:
-                    itinerary["cost_breakdown"]["transportation"] += trip_logistics["total_travel_cost"]
+                    itinerary["cost_breakdown"]["transportation"] += logistics_dict["total_travel_cost"]
                     itinerary["cost_breakdown"]["total"] = sum(itinerary["cost_breakdown"].values())
             
-            # Add departure day to day plans if it exists
-            if trip_logistics.get("departure_info") and itinerary.get("day_plans"):
-                departure_day = {
-                    "date": itinerary["day_plans"][0]["date"] if itinerary["day_plans"] else "",
-                    "day_type": "departure",
-                    "activities": [],
-                    "restaurants": [],
-                    "accommodations": [],
-                    "transportation": [f"Departure: {trip_logistics['departure_info']['notes']}"],
-                    "notes": f"Departure day from {starting_point} to {trip_logistics['departure_info']['to']}"
-                }
-                itinerary["day_plans"].insert(0, departure_day)
+            # Integrate departure logistics into the first day instead of creating a separate day
+            if logistics_dict.get("departure_info") and itinerary.get("day_plans"):
+                first_day = itinerary["day_plans"][0]
+                departure_transport = f"Departure: {logistics_dict['departure_info']['notes']}"
+                
+                # Add departure transportation to existing transportation or create new list
+                if "transportation" in first_day:
+                    first_day["transportation"].insert(0, departure_transport)
+                else:
+                    first_day["transportation"] = [departure_transport]
+                
+                # Add departure note to the first day
+                departure_note = f"Departure day from {starting_point} to {logistics_dict['departure_info']['to']}"
+                if "notes" in first_day:
+                    first_day["notes"] = departure_note + ". " + first_day["notes"]
+                else:
+                    first_day["notes"] = departure_note
             
-            # Add return day to day plans if it exists
-            if trip_logistics.get("return_info") and itinerary.get("day_plans"):
-                return_day = {
-                    "date": itinerary["day_plans"][-1]["date"] if itinerary["day_plans"] else "",
-                    "day_type": "return",
-                    "activities": [],
-                    "restaurants": [],
-                    "accommodations": [],
-                    "transportation": [f"Return: {trip_logistics['return_info']['notes']}"],
-                    "notes": f"Return day from {trip_logistics['return_info']['from']} to {starting_point}"
-                }
-                itinerary["day_plans"].append(return_day)
+            # Integrate return logistics into the last day instead of creating a separate day
+            if logistics_dict.get("return_info") and itinerary.get("day_plans"):
+                last_day = itinerary["day_plans"][-1]
+                return_transport = f"Return: {logistics_dict['return_info']['notes']}"
+                
+                # Add return transportation to existing transportation or create new list
+                if "transportation" in last_day:
+                    last_day["transportation"].append(return_transport)
+                else:
+                    last_day["transportation"] = [return_transport]
+                
+                # Add return note to the last day
+                return_note = f"Return day from {logistics_dict['return_info']['from']} to {starting_point}"
+                if "notes" in last_day:
+                    last_day["notes"] = last_day["notes"] + ". " + return_note
+                else:
+                    last_day["notes"] = return_note
             
             return itinerary
             
         except Exception as e:
             logger.error(f"Error adding trip logistics to itinerary: {e}")
             return itinerary
+    
+    def _add_journey_stops_to_itinerary(self, itinerary: Dict[str, Any], stops: List[Dict[str, Any]]) -> None:
+        """Add journey stops as activities to the appropriate days."""
+        try:
+            if not stops or not itinerary.get("day_plans"):
+                return
+            
+            # Add stops to the first day as journey activities
+            first_day = itinerary["day_plans"][0]
+            
+            # Create journey activities from stops
+            journey_activities = []
+            for stop in stops:
+                if stop.get("attractions"):
+                    for attraction in stop["attractions"]:
+                        journey_activities.append({
+                            "name": f"Journey Stop: {attraction.get('name', 'Unknown')}",
+                            "location": stop["location"],
+                            "duration": "1-2 hours",
+                            "cost": 20,  # Estimated cost for attraction
+                            "type": "journey_stop",
+                            "description": f"Stop along the journey: {attraction.get('name', 'Unknown')}",
+                            "stop_type": stop.get("stop_type", "attraction")
+                        })
+                elif stop.get("stop_type") == "rest":
+                    journey_activities.append({
+                        "name": "Rest Stop",
+                        "location": stop["location"],
+                        "duration": "30 minutes",
+                        "cost": 0,
+                        "type": "journey_stop",
+                        "description": "Rest stop for gas, food, and bathroom",
+                        "stop_type": "rest"
+                    })
+            
+            # Add journey activities to the first day
+            if journey_activities:
+                if "activities" in first_day:
+                    first_day["activities"].extend(journey_activities)
+                else:
+                    first_day["activities"] = journey_activities
+                
+                # Add journey note
+                journey_note = f"Journey includes {len(stops)} stops along the route"
+                if "notes" in first_day:
+                    first_day["notes"] = journey_note + ". " + first_day["notes"]
+                else:
+                    first_day["notes"] = journey_note
+                    
+        except Exception as e:
+            logger.error(f"Error adding journey stops to itinerary: {e}")
     
     def _get_coordinates(self, location: str) -> Optional[Tuple[float, float]]:
         """Get coordinates for a location using real geocoding service."""

@@ -231,6 +231,10 @@ class PlanningAgent:
             # Validate the geographic logic
             validation = GeographicUtils.validate_itinerary_geography(day_plans)
             
+            # Apply route optimization to day plans if available
+            if "optimized_route" in preferences:
+                day_plans = self._distribute_day_plans_by_route(day_plans, preferences["optimized_route"], preferences)
+            
             # Update state
             state_dict = state.model_dump()
             state_dict["day_plans"] = day_plans
@@ -428,78 +432,130 @@ class PlanningAgent:
         
         selected = []
         
-        if restaurants:
-            # Use day of week to create variety in dining
-            day_of_week = day_date.weekday()
-            
-            # Different cuisine focus for different days
-            day_cuisine_focus = {
-                0: ["local", "comfort"],  # Monday - comfort food
-                1: ["international", "asian"],  # Tuesday - try something new
-                2: ["italian", "mediterranean"],  # Wednesday - midweek treat
-                3: ["local", "seafood"],  # Thursday - fresh seafood
-                4: ["mexican", "latin"],  # Friday - fun Friday food
-                5: ["fine_dining", "steakhouse"],  # Saturday - special dining
-                6: ["brunch", "casual"]  # Sunday - relaxed dining
+        # Ensure we always have some restaurants, even if the list is empty
+        if not restaurants:
+            # Create default restaurants if none are available
+            restaurants = [
+                {
+                    "name": "Local Cafe",
+                    "cuisine": "local",
+                    "price_level": 2,
+                    "rating": 4.0,
+                    "cost_per_person": 25.0
+                },
+                {
+                    "name": "Regional Restaurant", 
+                    "cuisine": "regional",
+                    "price_level": 3,
+                    "rating": 4.2,
+                    "cost_per_person": 35.0
+                },
+                {
+                    "name": "Casual Dining",
+                    "cuisine": "casual",
+                    "price_level": 2,
+                    "rating": 3.8,
+                    "cost_per_person": 20.0
+                }
+            ]
+        
+        # Use day of week to create variety in dining
+        day_of_week = day_date.weekday()
+        
+        # Different cuisine focus for different days
+        day_cuisine_focus = {
+            0: ["local", "comfort"],  # Monday - comfort food
+            1: ["international", "asian"],  # Tuesday - try something new
+            2: ["italian", "mediterranean"],  # Wednesday - midweek treat
+            3: ["local", "seafood"],  # Thursday - fresh seafood
+            4: ["mexican", "latin"],  # Friday - fun Friday food
+            5: ["fine_dining", "steakhouse"],  # Saturday - special dining
+            6: ["brunch", "casual"]  # Sunday - relaxed dining
+        }
+        
+        # Get day-specific cuisine preferences
+        day_cuisines = day_cuisine_focus.get(day_of_week, ["local"])
+        
+        # Shuffle restaurants for variety
+        import random
+        shuffled_restaurants = list(restaurants)
+        random.seed(hash(day_date))  # Use date as seed for consistent but varied selection
+        random.shuffle(shuffled_restaurants)
+        
+        # Select 2-3 restaurants per day, prioritizing day-specific cuisines
+        selected_count = 0
+        max_restaurants = 3
+        
+        # First pass: try to get day-specific cuisines
+        for restaurant in shuffled_restaurants:
+            if selected_count >= max_restaurants:
+                break
+                
+            # Convert to dictionary format
+            restaurant_dict = {
+                "name": restaurant.get("name", f"Restaurant {selected_count+1}"),
+                "location": restaurant.get("location", {}),
+                "cuisine_type": restaurant.get("cuisine", "Local"),
+                "price_level": restaurant.get("price_level", 2),
+                "rating": restaurant.get("rating", 4.0),
+                "cost_per_person": restaurant.get("cost_per_person", 30.0)
             }
             
-            # Get day-specific cuisine preferences
-            day_cuisines = day_cuisine_focus.get(day_of_week, ["local"])
+            # Check if this restaurant matches day preferences
+            cuisine_matches = any(cuisine in restaurant_dict["cuisine_type"].lower() 
+                                for cuisine in day_cuisines)
             
-            # Shuffle restaurants for variety
-            import random
-            shuffled_restaurants = list(restaurants)
-            random.seed(hash(day_date))  # Use date as seed for consistent but varied selection
-            random.shuffle(shuffled_restaurants)
+            # Also check if we haven't already selected this restaurant
+            name_not_selected = restaurant_dict["name"] not in [r.get("name", "") for r in selected]
             
-            # Select 2-3 restaurants per day, prioritizing day-specific cuisines
-            selected_count = 0
-            max_restaurants = 3
+            if cuisine_matches and name_not_selected:
+                selected.append(restaurant_dict)
+                selected_count += 1
+        
+        # Second pass: fill remaining slots with any restaurants
+        for restaurant in shuffled_restaurants:
+            if selected_count >= max_restaurants:
+                break
+                
+            restaurant_dict = {
+                "name": restaurant.get("name", f"Restaurant {selected_count+1}"),
+                "location": restaurant.get("location", {}),
+                "cuisine_type": restaurant.get("cuisine", "Local"),
+                "price_level": restaurant.get("price_level", 2),
+                "rating": restaurant.get("rating", 4.0),
+                "cost_per_person": restaurant.get("cost_per_person", 30.0)
+            }
             
-            # First pass: try to get day-specific cuisines
-            for restaurant in shuffled_restaurants:
-                if selected_count >= max_restaurants:
-                    break
-                    
-                # Convert to dictionary format
-                restaurant_dict = {
-                    "name": restaurant.get("name", f"Restaurant {selected_count+1}"),
-                    "location": restaurant.get("location", {}),
-                    "cuisine_type": restaurant.get("cuisine", "Local"),
-                    "price_level": restaurant.get("price_level", 2),
-                    "rating": restaurant.get("rating", 4.0),
-                    "cost_per_person": restaurant.get("cost_per_person", 30.0)
+            # Check if we haven't already selected this restaurant
+            if restaurant_dict["name"] not in [r.get("name", "") for r in selected]:
+                selected.append(restaurant_dict)
+                selected_count += 1
+        
+        # Ensure we always return at least 2 restaurants
+        if len(selected) < 2:
+            # Add default restaurants if we don't have enough
+            default_restaurants = [
+                {
+                    "name": "Local Cafe",
+                    "cuisine_type": "Local",
+                    "price_level": 2,
+                    "rating": 4.0,
+                    "cost_per_person": 25.0
+                },
+                {
+                    "name": "Regional Restaurant",
+                    "cuisine_type": "Regional", 
+                    "price_level": 3,
+                    "rating": 4.2,
+                    "cost_per_person": 35.0
                 }
-                
-                # Check if this restaurant matches day preferences
-                cuisine_matches = any(cuisine in restaurant_dict["cuisine_type"].lower() 
-                                    for cuisine in day_cuisines)
-                
-                # Also check if we haven't already selected this restaurant
-                name_not_selected = restaurant_dict["name"] not in [r.get("name", "") for r in selected]
-                
-                if cuisine_matches and name_not_selected:
-                    selected.append(restaurant_dict)
-                    selected_count += 1
+            ]
             
-            # Second pass: fill remaining slots with any restaurants
-            for restaurant in shuffled_restaurants:
-                if selected_count >= max_restaurants:
-                    break
-                    
-                restaurant_dict = {
-                    "name": restaurant.get("name", f"Restaurant {selected_count+1}"),
-                    "location": restaurant.get("location", {}),
-                    "cuisine_type": restaurant.get("cuisine", "Local"),
-                    "price_level": restaurant.get("price_level", 2),
-                    "rating": restaurant.get("rating", 4.0),
-                    "cost_per_person": restaurant.get("cost_per_person", 30.0)
-                }
-                
-                # Check if we haven't already selected this restaurant
-                if restaurant_dict["name"] not in [r.get("name", "") for r in selected]:
-                    selected.append(restaurant_dict)
-                    selected_count += 1
+            for default_rest in default_restaurants:
+                if default_rest["name"] not in [r.get("name", "") for r in selected]:
+                    selected.append(default_rest)
+                    if len(selected) >= 2:
+                        break
         
         return selected
     
@@ -940,4 +996,79 @@ class PlanningAgent:
                 
         except Exception as e:
             logger.error(f"Error in planning workflow: {e}")
-            raise 
+            raise
+
+    def _distribute_day_plans_by_route(self, day_plans: List[Dict[str, Any]], 
+                                     optimized_route: Dict[str, Any], 
+                                     preferences: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Distribute day plans based on the optimized route to ensure logical geographic flow.
+        
+        Args:
+            day_plans: List of day plans
+            optimized_route: Optimized route information
+            preferences: User preferences
+            
+        Returns:
+            Updated day plans with proper destination distribution
+        """
+        try:
+            if not optimized_route or "route" not in optimized_route:
+                return day_plans
+            
+            route = optimized_route["route"]
+            if len(route) <= 2:  # Only starting point and one destination
+                return day_plans
+            
+            # For multi-destination trips, distribute days based on route
+            destinations = route[1:-1]  # Exclude starting point and return
+            num_destinations = len(destinations)
+            num_days = len(day_plans)
+            
+            if num_destinations == 0 or num_days == 0:
+                return day_plans
+            
+            # Calculate days per destination
+            days_per_destination = num_days // num_destinations
+            extra_days = num_days % num_destinations
+            
+            # Distribute days
+            current_day = 0
+            updated_day_plans = []
+            
+            for i, destination in enumerate(destinations):
+                # Calculate days for this destination
+                dest_days = days_per_destination + (1 if i < extra_days else 0)
+                
+                # Update day plans for this destination
+                for j in range(dest_days):
+                    if current_day < len(day_plans):
+                        day_plan = day_plans[current_day].copy()
+                        
+                        # Update destination information
+                        day_plan["destination"] = destination
+                        day_plan["route_notes"] = f"Day {current_day + 1} in {destination}"
+                        
+                        # Add route context
+                        if i > 0:  # Not the first destination
+                            day_plan["travel_from"] = destinations[i - 1]
+                        if i < len(destinations) - 1:  # Not the last destination
+                            day_plan["travel_to"] = destinations[i + 1]
+                        
+                        updated_day_plans.append(day_plan)
+                        current_day += 1
+            
+            # Add any remaining days to the last destination
+            while current_day < len(day_plans):
+                if updated_day_plans:
+                    day_plan = day_plans[current_day].copy()
+                    day_plan["destination"] = destinations[-1]
+                    day_plan["route_notes"] = f"Additional day in {destinations[-1]}"
+                    updated_day_plans.append(day_plan)
+                current_day += 1
+            
+            return updated_day_plans
+            
+        except Exception as e:
+            logger.error(f"Error distributing day plans by route: {e}")
+            return day_plans 

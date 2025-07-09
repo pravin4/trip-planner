@@ -195,3 +195,50 @@ class GooglePlacesAPI:
         except Exception as e:
             logger.error(f"Error getting nearby places: {e}")
             return APIResponse(success=False, error=str(e)) 
+    
+    def search_nearby(self, lat: float, lng: float, radius: int = 5000, 
+                     type: str = "tourist_attraction") -> List[Dict[str, Any]]:
+        """
+        Search for nearby places using coordinates.
+        
+        Args:
+            lat: Latitude
+            lng: Longitude
+            radius: Search radius in meters
+            type: Place type (e.g., 'tourist_attraction', 'airport', 'restaurant')
+            
+        Returns:
+            List of place dictionaries
+        """
+        try:
+            params = {
+                'location': f"{lat},{lng}",
+                'radius': radius
+            }
+            
+            if type:
+                params['type'] = type
+            
+            nearby_result = self.client.places_nearby(**params)
+            
+            places = []
+            for place in nearby_result.get('results', []):
+                place_dict = {
+                    'name': place.get('name', ''),
+                    'address': place.get('vicinity', ''),
+                    'location': {
+                        'lat': place['geometry']['location']['lat'],
+                        'lng': place['geometry']['location']['lng']
+                    },
+                    'place_id': place.get('place_id'),
+                    'rating': place.get('rating'),
+                    'price_level': place.get('price_level'),
+                    'types': place.get('types', [])
+                }
+                places.append(place_dict)
+            
+            return places
+            
+        except Exception as e:
+            logger.error(f"Error searching nearby places: {e}")
+            return [] 

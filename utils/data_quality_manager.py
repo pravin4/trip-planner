@@ -105,6 +105,9 @@ class DataQualityManager:
         try:
             day_plans = itinerary.get("day_plans", [])
             
+            # Step 0: Clean location strings (fix geocoding issues)
+            day_plans = self._clean_location_strings(day_plans)
+            
             # Step 1: Improve activity variety
             day_plans = self._improve_activity_variety(day_plans, preferences)
             
@@ -475,3 +478,80 @@ class DataQualityManager:
             disclaimers.append("⚠️ **Geographic Efficiency**: Some days may be quite busy - consider spreading activities across more days.")
         
         return disclaimers 
+
+    def _clean_location_strings(self, day_plans: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Clean up malformed location strings that cause geocoding issues."""
+        
+        for day_plan in day_plans:
+            # Clean activities
+            for activity in day_plan.get("activities", []):
+                if "location" in activity:
+                    activity["location"] = self._clean_location(activity["location"])
+                if "name" in activity:
+                    activity["name"] = self._clean_activity_name(activity["name"])
+            
+            # Clean accommodations
+            for accommodation in day_plan.get("accommodations", []):
+                if "location" in accommodation:
+                    accommodation["location"] = self._clean_location(accommodation["location"])
+                if "name" in accommodation:
+                    accommodation["name"] = self._clean_accommodation_name(accommodation["name"])
+            
+            # Clean restaurants
+            for restaurant in day_plan.get("restaurants", []):
+                if "location" in restaurant:
+                    restaurant["location"] = self._clean_location(restaurant["location"])
+                if "name" in restaurant:
+                    restaurant["name"] = self._clean_restaurant_name(restaurant["name"])
+        
+        return day_plans
+    
+    def _clean_location(self, location: str) -> str:
+        """Clean a location string to make it geocodable."""
+        if not location:
+            return location
+        
+        # Remove duplicate parts like "Big Sur River Gorge, Big Sur River Gorge and nearby attractions"
+        if "," in location:
+            parts = [part.strip() for part in location.split(",")]
+            # Remove duplicates and "and nearby attractions" type suffixes
+            cleaned_parts = []
+            for part in parts:
+                if part not in cleaned_parts and not any(suffix in part.lower() for suffix in [
+                    "and nearby attractions", "and surrounding area", "and vicinity"
+                ]):
+                    cleaned_parts.append(part)
+            
+            # Take the first meaningful part
+            if cleaned_parts:
+                return cleaned_parts[0]
+        
+        return location
+    
+    def _clean_activity_name(self, name: str) -> str:
+        """Clean an activity name."""
+        if not name:
+            return name
+        
+        # Remove location suffixes that shouldn't be in the name
+        suffixes_to_remove = [
+            " and nearby attractions",
+            " and surrounding area", 
+            " and vicinity",
+            ", Big Sur River Gorge and nearby attractions",
+            ", Andrew Molera State Park and nearby attractions"
+        ]
+        
+        for suffix in suffixes_to_remove:
+            if name.endswith(suffix):
+                name = name[:-len(suffix)]
+        
+        return name.strip()
+    
+    def _clean_accommodation_name(self, name: str) -> str:
+        """Clean an accommodation name."""
+        return self._clean_activity_name(name)
+    
+    def _clean_restaurant_name(self, name: str) -> str:
+        """Clean a restaurant name."""
+        return self._clean_activity_name(name) 

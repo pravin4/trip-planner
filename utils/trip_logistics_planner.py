@@ -421,4 +421,129 @@ class TripLogisticsPlanner:
                 "notes": logistics.return_leg.notes
             }
         
-        return summary 
+        return summary
+    
+    def optimize_multi_destination_route(self, starting_point: str, destinations: List[str], 
+                                       preferences: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Optimize route for multiple destinations to minimize backtracking.
+        
+        Args:
+            starting_point: Starting location
+            destinations: List of destinations to visit
+            preferences: User preferences
+            
+        Returns:
+            Optimized route with logical flow
+        """
+        try:
+            if not destinations:
+                return {"route": [starting_point], "total_distance": 0}
+            
+            # Get coordinates for all locations
+            locations = [starting_point] + destinations
+            coordinates = {}
+            
+            for location in locations:
+                coords = self._get_coordinates(location)
+                if coords:
+                    coordinates[location] = coords
+                else:
+                    # Use default coordinates if not found
+                    coordinates[location] = (0, 0)
+            
+            # Calculate distances between all locations
+            distance_matrix = {}
+            for loc1 in locations:
+                distance_matrix[loc1] = {}
+                for loc2 in locations:
+                    if loc1 != loc2:
+                        dist = self._calculate_distance(coordinates[loc1], coordinates[loc2])
+                        distance_matrix[loc1][loc2] = dist
+                    else:
+                        distance_matrix[loc1][loc2] = 0
+            
+            # Simple greedy algorithm to find optimal route
+            # Start from starting point, always go to nearest unvisited destination
+            unvisited = destinations.copy()
+            current = starting_point
+            route = [starting_point]
+            total_distance = 0
+            
+            while unvisited:
+                # Find nearest unvisited destination
+                nearest = None
+                min_distance = float('inf')
+                
+                for dest in unvisited:
+                    distance = distance_matrix[current][dest]
+                    if distance < min_distance:
+                        min_distance = distance
+                        nearest = dest
+                
+                if nearest:
+                    route.append(nearest)
+                    total_distance += min_distance
+                    current = nearest
+                    unvisited.remove(nearest)
+                else:
+                    break
+            
+            # Add return to starting point
+            if route[-1] != starting_point:
+                return_distance = distance_matrix[route[-1]][starting_point]
+                total_distance += return_distance
+                route.append(starting_point)
+            
+            # Create route segments
+            route_segments = []
+            for i in range(len(route) - 1):
+                from_loc = route[i]
+                to_loc = route[i + 1]
+                distance = distance_matrix[from_loc][to_loc]
+                
+                segment = {
+                    "from": from_loc,
+                    "to": to_loc,
+                    "distance_km": distance,
+                    "mode": self._select_transportation_mode(distance, preferences),
+                    "duration_hours": self._calculate_duration(distance, 
+                        self._select_transportation_mode(distance, preferences)),
+                    "cost_per_person": self._calculate_cost(distance, 
+                        self._select_transportation_mode(distance, preferences), preferences)
+                }
+                route_segments.append(segment)
+            
+            return {
+                "route": route,
+                "route_segments": route_segments,
+                "total_distance": total_distance,
+                "total_cost": sum(seg["cost_per_person"] for seg in route_segments),
+                "total_duration": sum(seg["duration_hours"] for seg in route_segments),
+                "optimization_notes": self._generate_route_optimization_notes(route, total_distance)
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error optimizing route: {e}")
+            return {"route": [starting_point] + destinations, "total_distance": 0}
+    
+    def _generate_route_optimization_notes(self, route: List[str], total_distance: float) -> str:
+        """Generate notes about the optimized route."""
+        if len(route) <= 3:
+            return "Direct route with minimal backtracking."
+        
+        # Analyze the route for efficiency
+        notes = []
+        
+        # Check for backtracking
+        if len(route) > 3:
+            notes.append("Multi-destination route optimized to minimize travel time.")
+        
+        if total_distance > 500:
+            notes.append("Long-distance trip - consider breaking into multiple trips.")
+        elif total_distance > 200:
+            notes.append("Moderate distance - plan for rest stops and fuel.")
+        else:
+            notes.append("Short to moderate distance - efficient route planned.")
+        
+        return " ".join(notes) 

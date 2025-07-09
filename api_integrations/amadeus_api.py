@@ -8,6 +8,9 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import requests
 import json
 from typing import List, Dict, Optional, Any
@@ -230,12 +233,14 @@ class AmadeusAPI:
     def get_city_code(self, city_name: str) -> Optional[str]:
         """Get IATA city code for a city name."""
         try:
-            # First try the common city codes
-            city_lower = city_name.lower()
-            if city_lower in self.common_city_codes:
-                return self.common_city_codes[city_lower]
+            # Clean the city name - remove state suffix if present
+            city_clean = city_name.split(',')[0].strip().lower()
             
-            # Try API lookup
+            # First try the common city codes
+            if city_clean in self.common_city_codes:
+                return self.common_city_codes[city_clean]
+            
+            # Try API lookup with original name
             params = {
                 'keyword': city_name,
                 'subType': 'CITY'

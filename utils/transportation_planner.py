@@ -306,3 +306,53 @@ class TransportationPlanner:
         # This method can be expanded to handle travel day adjustments
         # For now, return the original day plans
         return day_plans 
+
+    def get_driving_route(self, origin_coords: Tuple[float, float], 
+                         dest_coords: Tuple[float, float]) -> Dict[str, Any]:
+        """
+        Get driving route between two coordinates.
+        
+        Args:
+            origin_coords: Origin coordinates (lat, lng)
+            dest_coords: Destination coordinates (lat, lng)
+            
+        Returns:
+            Dictionary with route information
+        """
+        try:
+            # Calculate distance
+            distance = self._calculate_distance(origin_coords, dest_coords)
+            
+            # Calculate duration (assuming 60 km/h average speed)
+            duration_hours = distance / 60
+            
+            # Create waypoints (simplified - just start and end)
+            waypoints = [
+                {
+                    "location": {"lat": origin_coords[0], "lng": origin_coords[1]},
+                    "duration": 0,
+                    "distance": 0
+                },
+                {
+                    "location": {"lat": dest_coords[0], "lng": dest_coords[1]},
+                    "duration": duration_hours,
+                    "distance": distance
+                }
+            ]
+            
+            return {
+                "distance": distance,
+                "duration": duration_hours,
+                "waypoints": waypoints,
+                "mode": "driving"
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error getting driving route: {e}")
+            return {
+                "distance": 0,
+                "duration": 0,
+                "waypoints": [],
+                "mode": "driving",
+                "error": str(e)
+            } 
