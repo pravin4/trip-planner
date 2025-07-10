@@ -59,6 +59,78 @@ class TripLogisticsPlanner:
         "atlanta": (33.7490, -84.3880)
     }
     
+    # Additional destination coordinates
+    DESTINATION_COORDS = {
+        "shelter cove": (40.0304, -124.0731),
+        "big sur": (36.2704, -121.8081),
+        "solvang": (34.5958, -120.1376),
+        "napa": (38.2975, -122.2869),
+        "yosemite": (37.8651, -119.5383),
+        "lake tahoe": (39.0968, -120.0324),
+        "monterey": (36.6002, -121.8947),
+        "santa barbara": (34.4208, -119.6982),
+        "palm springs": (33.8303, -116.5453),
+        "carmel": (36.5552, -121.9233),
+        "santa cruz": (36.9741, -122.0308),
+        "half moon bay": (37.4636, -122.4286),
+        "pacific grove": (36.6177, -121.9166),
+        "cambria": (35.5641, -121.0807),
+        "san luis obispo": (35.2828, -120.6596),
+        "pismo beach": (35.1428, -120.6413),
+        "avila beach": (35.1800, -120.7319),
+        "morro bay": (35.3658, -120.8499),
+        "cayucos": (35.4428, -120.8921),
+        "cambria": (35.5641, -121.0807),
+        "san simeon": (35.6444, -121.1891),
+        "gorda": (35.9094, -121.4655),
+        "lucia": (36.0166, -121.5497),
+        "partington cove": (36.1197, -121.6419),
+        "garrapata state park": (36.4669, -121.9297),
+        "point lobos": (36.5166, -121.9422),
+        "17-mile drive": (36.5697, -121.9497),
+        "pebble beach": (36.5697, -121.9497),
+        "carmel-by-the-sea": (36.5552, -121.9233),
+        "point sur": (36.3083, -121.8994),
+        "bixby bridge": (36.3723, -121.9019),
+        "mcfway falls": (36.2704, -121.8081),
+        "pfeiffer beach": (36.2405, -121.7777),
+        "julia pfeiffer burns state park": (36.1697, -121.6708),
+        "andrew molera state park": (36.2858, -121.8472),
+        "point sur lighthouse": (36.3083, -121.8994),
+        "garrapata beach": (36.4669, -121.9297),
+        "rocky point": (36.5697, -121.9497),
+        "bird rock": (36.5697, -121.9497),
+        "cypress point": (36.5697, -121.9497),
+        "china rock": (36.5697, -121.9497),
+        "ghost trees": (36.5697, -121.9497),
+        "pacific grove": (36.6177, -121.9166),
+        "asilomar state beach": (36.6177, -121.9166),
+        "lovers point": (36.6177, -121.9166),
+        "point piños": (36.6333, -121.9333),
+        "monterey bay aquarium": (36.6183, -121.9016),
+        "cannery row": (36.6183, -121.9016),
+        "fisherman's wharf": (36.6183, -121.9016),
+        "old fisherman's wharf": (36.6183, -121.9016),
+        "presidio of monterey": (36.6183, -121.9016),
+        "monterey state beach": (36.6183, -121.9016),
+        "del monte beach": (36.6183, -121.9016),
+        "san carlos beach": (36.6183, -121.9016),
+        "coast guard pier": (36.6183, -121.9016),
+        "breakwater cove": (36.6183, -121.9016),
+        "lovers point park": (36.6177, -121.9166),
+        "asilomar conference grounds": (36.6177, -121.9166),
+        "asilomar beach": (36.6177, -121.9166),
+        "asilomar dunes": (36.6177, -121.9166),
+        "asilomar tide pools": (36.6177, -121.9166),
+        "asilomar coastal trail": (36.6177, -121.9166),
+        "asilomar state beach": (36.6177, -121.9166),
+        "asilomar conference grounds": (36.6177, -121.9166),
+        "asilomar beach": (36.6177, -121.9166),
+        "asilomar dunes": (36.6177, -121.9166),
+        "asilomar tide pools": (36.6177, -121.9166),
+        "asilomar coastal trail": (36.6177, -121.9166)
+    }
+    
     # Transportation modes and their characteristics
     TRANSPORT_MODES = {
         "car": {
@@ -253,30 +325,32 @@ class TripLogisticsPlanner:
         if location_lower in self.STARTING_POINTS:
             return self.STARTING_POINTS[location_lower]
         
-        # Check partial matches
+        # Check destination coordinates
+        if location_lower in self.DESTINATION_COORDS:
+            return self.DESTINATION_COORDS[location_lower]
+        
+        # Check partial matches in starting points
         for known_location, coords in self.STARTING_POINTS.items():
             if location_lower in known_location or known_location in location_lower:
                 return coords
         
-        # For unknown locations, estimate based on common patterns
-        if "big sur" in location_lower:
-            return (36.2704, -121.8081)  # Big Sur coordinates
-        elif "solvang" in location_lower:
-            return (34.5958, -120.1376)  # Solvang coordinates
-        elif "napa" in location_lower:
-            return (38.2975, -122.2869)  # Napa Valley coordinates
-        elif "yosemite" in location_lower:
-            return (37.8651, -119.5383)  # Yosemite coordinates
-        elif "lake tahoe" in location_lower:
-            return (39.0968, -120.0324)  # Lake Tahoe coordinates
-        elif "monterey" in location_lower:
-            return (36.6002, -121.8947)  # Monterey coordinates
-        elif "santa barbara" in location_lower:
-            return (34.4208, -119.6982)  # Santa Barbara coordinates
-        elif "palm springs" in location_lower:
-            return (33.8303, -116.5453)  # Palm Springs coordinates
+        # Check partial matches in destination coordinates
+        for known_location, coords in self.DESTINATION_COORDS.items():
+            if location_lower in known_location or known_location in location_lower:
+                return coords
+        
+        # For unknown locations, try to use a geocoding service
+        try:
+            from utils.geocoding_service import GeocodingService
+            geocoding = GeocodingService()
+            coords = geocoding.get_coordinates(location)
+            if coords:
+                return coords
+        except Exception as e:
+            self.logger.warning(f"Could not geocode {location}: {e}")
         
         # Default to San Francisco if unknown
+        self.logger.warning(f"Unknown location: {location}, using San Francisco as fallback")
         return (37.7749, -122.4194)
     
     def _calculate_distance(self, from_coords: Tuple[float, float], 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Journey Planning Agent
-Handles road trips, flights, and multi-modal transportation planning.
+Handles road trips, flights, and multi-modal transportation planning with dynamic configuration.
 """
 
 import os
@@ -15,12 +15,14 @@ import logging
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from langchain_openai import ChatOpenAI
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, END, START
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 from utils.geocoding_service import GeocodingService
 from utils.transportation_planner import TransportationPlanner
+from utils.dynamic_route_planner import DynamicRoutePlanner
 from api_integrations.google_places import GooglePlacesAPI
+from config.dynamic_config import config_manager
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +45,7 @@ class JourneyState:
     messages: List[Dict[str, Any]] = None
 
 class JourneyAgent:
-    """Agent for planning journeys including road trips and flights."""
+    """Agent for planning journeys including road trips and flights with dynamic configuration."""
     
     def __init__(self):
         """Initialize the Journey Agent."""
@@ -51,6 +53,8 @@ class JourneyAgent:
         self.geocoding = GeocodingService()
         self.transportation = TransportationPlanner()
         self.google_places = GooglePlacesAPI()
+        self.dynamic_route_planner = DynamicRoutePlanner()
+        self.config = config_manager
         
         # Create the workflow
         self.workflow = self._create_workflow()
@@ -78,7 +82,6 @@ class JourneyAgent:
         workflow.add_edge("finalize_journey", END)
         
         # Add START edge
-        from langgraph.graph import START
         workflow.add_edge(START, "analyze_journey")
         
         return workflow.compile()
@@ -86,26 +89,39 @@ class JourneyAgent:
     def _analyze_journey(self, state: JourneyState) -> JourneyState:
         """Analyze the journey requirements and determine travel mode."""
         try:
-            origin_coords = self.geocoding.get_coordinates(state.origin)
-            dest_coords = self.geocoding.get_coordinates(state.destination)
+            # Clean and validate location strings
+            origin_clean = self._clean_location_string(state.origin)
+            dest_clean = self._clean_location_string(state.destination)
+            
+            origin_coords = self.geocoding.get_coordinates(origin_clean)
+            dest_coords = self.geocoding.get_coordinates(dest_clean)
             
             if not origin_coords or not dest_coords:
-                raise ValueError(f"Could not get coordinates for {state.origin} or {state.destination}")
+                # Try with fallback locations
+                origin_coords = self._get_fallback_coordinates(origin_clean)
+                dest_coords = self._get_fallback_coordinates(dest_clean)
+                
+                if not origin_coords or not dest_coords:
+                    raise ValueError(f"Could not get coordinates for {origin_clean} or {dest_clean}")
             
             # Calculate direct distance
             distance = self._calculate_distance(origin_coords, dest_coords)
             
-            # Determine travel mode based on distance and preferences
-            if distance > 800:  # More than 800 km
-                state.travel_mode = "fly"
-            elif distance > 400:  # 400-800 km
-                state.travel_mode = "multi_modal"
-            else:
-                state.travel_mode = "drive"
+            # Get dynamic distance thresholds from configuration
+            distance_config = self.config.get_distance_config()
             
-            # Override if specified in preferences
+            # Check for user preferences first (this should override everything)
             if state.preferences and "travel_mode" in state.preferences:
                 state.travel_mode = state.preferences["travel_mode"]
+                logger.info(f"Using user-specified travel mode: {state.travel_mode}")
+            else:
+                # Determine travel mode based on dynamic distance thresholds
+                if distance > distance_config.long_distance_threshold:
+                    state.travel_mode = "fly"
+                elif distance > distance_config.medium_distance_threshold:
+                    state.travel_mode = "multi_modal"
+                else:
+                    state.travel_mode = "drive"  # Default to drive for reasonable distances
             
             # Store distance for later use
             state.total_distance = distance
@@ -125,16 +141,26 @@ class JourneyAgent:
     def _plan_route(self, state: JourneyState) -> JourneyState:
         """Plan the route between origin and destination."""
         try:
-            origin_coords = self.geocoding.get_coordinates(state.origin)
-            dest_coords = self.geocoding.get_coordinates(state.destination)
+            origin_clean = self._clean_location_string(state.origin)
+            dest_clean = self._clean_location_string(state.destination)
+            
+            origin_coords = self.geocoding.get_coordinates(origin_clean)
+            dest_coords = self.geocoding.get_coordinates(dest_clean)
             
             if state.travel_mode in ["drive", "multi_modal"]:
-                # Get driving route
+                # Get driving route with intermediate waypoints
                 route = self.transportation.get_driving_route(
                     origin_coords, dest_coords
                 )
                 
                 if route:
+                    # Add intermediate waypoints for long journeys
+                    if state.total_distance > 200:  # More than 200 km
+                        intermediate_waypoints = self._add_intermediate_waypoints(
+                            origin_coords, dest_coords, route
+                        )
+                        route["waypoints"] = intermediate_waypoints
+                    
                     state.journey_plan = {
                         "route": route,
                         "distance": route.get("distance", 0),
@@ -157,7 +183,7 @@ class JourneyAgent:
         return state
     
     def _find_stops(self, state: JourneyState) -> JourneyState:
-        """Find interesting stops along the route."""
+        """Find interesting stops along the route using dynamic route planning."""
         try:
             if state.travel_mode not in ["drive", "multi_modal"]:
                 return state
@@ -165,39 +191,37 @@ class JourneyAgent:
             if not state.journey_plan or not state.journey_plan.get("waypoints"):
                 return state
             
-            stops = []
+            # Extract route coordinates for dynamic stop finding
+            route_coords = []
             waypoints = state.journey_plan["waypoints"]
             
-            # Find stops every 2-3 hours of driving
-            target_stop_interval = 2.5  # hours
-            current_duration = 0
+            for waypoint in waypoints:
+                if "location" in waypoint:
+                    route_coords.append((waypoint["location"]["lat"], waypoint["location"]["lng"]))
             
-            for i, waypoint in enumerate(waypoints):
-                current_duration += waypoint.get("duration", 0)
-                
-                if current_duration >= target_stop_interval:
-                    # Find interesting places near this waypoint
-                    nearby_places = self._find_nearby_attractions(waypoint["location"])
-                    
-                    if nearby_places:
-                        stops.append({
-                            "location": waypoint["location"],
-                            "duration": current_duration,
-                            "attractions": nearby_places[:3],  # Top 3 attractions
-                            "stop_type": "attraction"
-                        })
-                    
-                    current_duration = 0  # Reset timer
+            # Use dynamic route planner to find stops
+            dynamic_stops = self.dynamic_route_planner.find_dynamic_stops(
+                state.origin, state.destination, route_coords
+            )
             
-            # Add rest stops for long journeys
-            if state.total_duration > 6:
+            # Add rest stops for long journeys using dynamic intervals
+            if state.total_duration > self.config.get_distance_config().rest_stop_interval:
                 rest_stops = self._add_rest_stops(waypoints)
-                stops.extend(rest_stops)
+                dynamic_stops.extend(rest_stops)
             
-            state.route_stops = stops
+            # Remove duplicates and sort by distance
+            unique_stops = []
+            seen_locations = set()
+            for stop in dynamic_stops:
+                location_key = f"{stop['location'].get('lat', 0):.3f},{stop['location'].get('lng', 0):.3f}"
+                if location_key not in seen_locations:
+                    unique_stops.append(stop)
+                    seen_locations.add(location_key)
+            
+            state.route_stops = sorted(unique_stops, key=lambda x: x.get("distance_from_origin", 0))
             
             state.messages = add_messages(state.messages, [
-                ("system", f"Found {len(stops)} stops along the route")
+                ("system", f"Found {len(state.route_stops)} dynamic stops along the route")
             ])
             
         except Exception as e:
@@ -271,8 +295,10 @@ class JourneyAgent:
         return state
     
     def _calculate_journey_costs(self, state: JourneyState) -> JourneyState:
-        """Calculate costs for the journey."""
+        """Calculate costs for the journey using dynamic pricing."""
         try:
+            cost_config = self.config.get_cost_config()
+            
             costs = {
                 "transportation": 0,
                 "accommodations": 0,
@@ -281,44 +307,49 @@ class JourneyAgent:
                 "total": 0
             }
             
-            # Transportation costs
+            # Transportation costs using dynamic pricing
             if state.travel_mode == "drive":
-                # Gas cost (assuming 25 mpg, $3.50/gallon)
-                gas_cost = (state.total_distance * 1.609) / 25 * 3.50  # Convert km to miles
-                costs["transportation"] = gas_cost
+                # Dynamic gas cost calculation
+                gas_cost = self.config.calculate_dynamic_gas_cost(state.total_distance)
+                
+                # Dynamic toll cost calculation
+                toll_cost = self.config.calculate_dynamic_toll_cost(state.total_distance)
+                
+                # Dynamic parking cost calculation
+                parking_cost = self.config.calculate_dynamic_parking_cost(state.total_duration)
+                
+                costs["transportation"] = gas_cost + toll_cost + parking_cost
                 
             elif state.travel_mode == "fly":
-                # Flight cost (mock data)
-                costs["transportation"] = state.flight_info.get("cost", 400) if state.flight_info else 400
+                # Flight cost using dynamic pricing
+                flight_cost = state.total_distance * cost_config.flight_cost_per_km
+                costs["transportation"] = flight_cost
                 
             elif state.travel_mode == "multi_modal":
-                # Combination of driving and flying
-                drive_distance = state.journey_plan.get("distance", 0) if state.journey_plan else 0
-                gas_cost = (drive_distance * 1.609) / 25 * 3.50
-                flight_cost = state.flight_info.get("cost", 300) if state.flight_info else 300
-                costs["transportation"] = gas_cost + flight_cost
+                # Multi-modal cost (combination of different modes)
+                drive_distance = state.total_distance * 0.3  # Assume 30% driving
+                fly_distance = state.total_distance * 0.7   # Assume 70% flying
+                
+                drive_cost = self.config.calculate_dynamic_gas_cost(drive_distance)
+                fly_cost = fly_distance * cost_config.flight_cost_per_km
+                
+                costs["transportation"] = drive_cost + fly_cost
             
-            # Accommodation costs for overnight stops
+            # Activity costs (based on number of stops)
             if state.route_stops:
-                overnight_stops = [s for s in state.route_stops if s.get("overnight", False)]
-                costs["accommodations"] = len(overnight_stops) * 150  # $150 per night
-            
-            # Activity costs for stops
-            if state.route_stops:
-                activity_cost = sum(len(s.get("attractions", [])) * 20 for s in state.route_stops)
+                activity_cost = len(state.route_stops) * 25  # $25 per stop/activity
                 costs["activities"] = activity_cost
             
-            # Meal costs
-            journey_days = max(1, int(state.total_duration / 8))  # Assume 8 hours per day
-            costs["meals"] = journey_days * 50  # $50 per day for meals
+            # Meal costs (based on journey duration)
+            meal_cost = max(1, state.total_duration / 4) * 15  # $15 per meal, every 4 hours
+            costs["meals"] = meal_cost
             
+            # Calculate total
             costs["total"] = sum(costs.values())
             state.total_cost = costs["total"]
             
-            state.journey_plan["costs"] = costs
-            
             state.messages = add_messages(state.messages, [
-                ("system", f"Journey costs calculated: ${costs['total']:.2f}")
+                ("system", f"Journey costs calculated: ${costs['total']:.2f} total")
             ])
             
         except Exception as e:
@@ -366,42 +397,73 @@ class JourneyAgent:
                     end_date: str, preferences: Dict[str, Any] = None) -> Dict[str, Any]:
         """Plan a complete journey from origin to destination."""
         try:
-            # Initialize state
+            # Initialize state with proper defaults
             state = JourneyState(
                 origin=origin,
                 destination=destination,
                 start_date=start_date,
                 end_date=end_date,
                 preferences=preferences or {},
+                journey_plan={},
+                route_stops=[],
+                flight_info={},
+                airport_info={},
                 messages=[]
             )
             
             # Run the workflow
             final_state = self.workflow.invoke(state)
             
-            # Return the journey plan
-            if hasattr(final_state, "journey_plan") and final_state.journey_plan:
-                return final_state.journey_plan
-            elif hasattr(final_state, "model_dump"):
-                return final_state.model_dump()
+            # Handle both dict and object returns from LangGraph
+            if isinstance(final_state, dict):
+                # Newer LangGraph versions return dict
+                journey_plan = final_state.get("journey_plan", {})
+                travel_mode = final_state.get("travel_mode", "drive")
+                total_distance = final_state.get("total_distance", 0)
+                total_duration = final_state.get("total_duration", 0)
+                total_cost = final_state.get("total_cost", 0)
+                route_stops = final_state.get("route_stops", [])
             else:
-                # Convert dataclass to dict
-                return {
-                    "origin": final_state.origin,
-                    "destination": final_state.destination,
-                    "travel_mode": final_state.travel_mode,
-                    "total_distance": final_state.total_distance,
-                    "total_duration": final_state.total_duration,
-                    "total_cost": final_state.total_cost,
-                    "journey_plan": final_state.journey_plan,
-                    "route_stops": final_state.route_stops,
-                    "flight_info": final_state.flight_info,
-                    "airport_info": final_state.airport_info
-                }
-                
+                # Older LangGraph versions return state object
+                journey_plan = final_state.journey_plan or {}
+                travel_mode = final_state.travel_mode
+                total_distance = final_state.total_distance
+                total_duration = final_state.total_duration
+                total_cost = final_state.total_cost
+                route_stops = final_state.route_stops or []
+            
+            # Return comprehensive journey plan
+            return {
+                "travel_mode": travel_mode,
+                "total_distance": total_distance,
+                "total_duration": total_duration,
+                "total_cost": total_cost,
+                "route_stops": route_stops,
+                "journey_plan": journey_plan,
+                "origin": origin,
+                "destination": destination,
+                "start_date": start_date,
+                "end_date": end_date,
+                "preferences": preferences or {}
+            }
+            
         except Exception as e:
             logger.error(f"Error planning journey: {e}")
-            return {"error": str(e)}
+            # Return fallback plan
+            return {
+                "travel_mode": "drive",
+                "total_distance": 0,
+                "total_duration": 0,
+                "total_cost": 0,
+                "route_stops": [],
+                "journey_plan": {},
+                "origin": origin,
+                "destination": destination,
+                "start_date": start_date,
+                "end_date": end_date,
+                "preferences": preferences or {},
+                "error": str(e)
+            }
     
     def _calculate_distance(self, coords1: Tuple[float, float], coords2: Tuple[float, float]) -> float:
         """Calculate distance between two coordinates in km."""
@@ -524,3 +586,197 @@ class JourneyAgent:
             })
         
         return timing 
+
+    def _get_predefined_stops(self, origin: str, destination: str) -> List[Dict[str, Any]]:
+        """Get predefined stops for popular routes."""
+        origin_lower = origin.lower()
+        dest_lower = destination.lower()
+        
+        # San Jose to Shelter Cove route
+        if "san jose" in origin_lower and "shelter cove" in dest_lower:
+            return [
+                {
+                    "location": {"lat": 37.7749, "lng": -122.4194},
+                    "duration": 1.0,
+                    "name": "San Francisco",
+                    "attractions": [
+                        {"name": "Golden Gate Bridge", "type": "landmark"},
+                        {"name": "Fisherman's Wharf", "type": "attraction"},
+                        {"name": "Alcatraz Island", "type": "historical"}
+                    ],
+                    "stop_type": "major_city",
+                    "description": "Stop in San Francisco for iconic landmarks and attractions"
+                },
+                {
+                    "location": {"lat": 36.6002, "lng": -121.8947},
+                    "duration": 3.5,
+                    "name": "Monterey",
+                    "attractions": [
+                        {"name": "Monterey Bay Aquarium", "type": "aquarium"},
+                        {"name": "Cannery Row", "type": "historical"},
+                        {"name": "17-Mile Drive", "type": "scenic"}
+                    ],
+                    "stop_type": "coastal_town",
+                    "description": "Visit Monterey for the famous aquarium and coastal views"
+                },
+                {
+                    "location": {"lat": 36.2704, "lng": -121.8081},
+                    "duration": 5.0,
+                    "name": "Big Sur",
+                    "attractions": [
+                        {"name": "Bixby Bridge", "type": "landmark"},
+                        {"name": "McWay Falls", "type": "waterfall"},
+                        {"name": "Pfeiffer Beach", "type": "beach"}
+                    ],
+                    "stop_type": "scenic",
+                    "description": "Experience the stunning Big Sur coastline"
+                }
+            ]
+        
+        # San Jose to Big Sur route
+        elif "san jose" in origin_lower and "big sur" in dest_lower:
+            return [
+                {
+                    "location": {"lat": 36.6002, "lng": -121.8947},
+                    "duration": 2.5,
+                    "name": "Monterey",
+                    "attractions": [
+                        {"name": "Monterey Bay Aquarium", "type": "aquarium"},
+                        {"name": "Cannery Row", "type": "historical"}
+                    ],
+                    "stop_type": "coastal_town"
+                }
+            ]
+        
+        # Generic California coastal route
+        elif any(city in origin_lower for city in ["san jose", "san francisco", "oakland"]) and \
+             any(city in dest_lower for city in ["monterey", "carmel", "big sur", "santa barbara"]):
+            return [
+                {
+                    "location": {"lat": 36.6002, "lng": -121.8947},
+                    "duration": 2.0,
+                    "name": "Monterey",
+                    "attractions": [
+                        {"name": "Monterey Bay Aquarium", "type": "aquarium"},
+                        {"name": "Cannery Row", "type": "historical"}
+                    ],
+                    "stop_type": "coastal_town"
+                }
+            ]
+        
+        return [] 
+
+    def _clean_location_string(self, location: str) -> str:
+        """Clean location string for better geocoding."""
+        if not location:
+            return ""
+        
+        # Remove extra whitespace and normalize
+        cleaned = location.strip()
+        
+        # Handle common abbreviations
+        abbreviations = {
+            "SF": "San Francisco",
+            "NYC": "New York City",
+            "LA": "Los Angeles",
+            "DC": "Washington DC",
+            "Vegas": "Las Vegas",
+            "Philly": "Philadelphia"
+        }
+        
+        for abbr, full in abbreviations.items():
+            if cleaned.upper() == abbr.upper():
+                cleaned = full
+                break
+        
+        return cleaned
+    
+    def _get_fallback_coordinates(self, location: str) -> Optional[Tuple[float, float]]:
+        """Get fallback coordinates for common locations."""
+        fallback_coords = {
+            "San Francisco": (37.7749, -122.4194),
+            "New York City": (40.7128, -74.0060),
+            "Los Angeles": (34.0522, -118.2437),
+            "Chicago": (41.8781, -87.6298),
+            "Miami": (25.7617, -80.1918),
+            "Seattle": (47.6062, -122.3321),
+            "Denver": (39.7392, -104.9903),
+            "Austin": (30.2672, -97.7431),
+            "Nashville": (36.1627, -86.7816),
+            "New Orleans": (29.9511, -90.0715),
+            "Portland": (45.5152, -122.6784),
+            "San Diego": (32.7157, -117.1611),
+            "Las Vegas": (36.1699, -115.1398),
+            "Phoenix": (33.4484, -112.0740),
+            "Dallas": (32.7767, -96.7970),
+            "Houston": (29.7604, -95.3698),
+            "Atlanta": (33.7490, -84.3880),
+            "Boston": (42.3601, -71.0589),
+            "Philadelphia": (39.9526, -75.1652),
+            "Washington DC": (38.9072, -77.0369)
+        }
+        
+        return fallback_coords.get(location)
+    
+    def _add_intermediate_waypoints(self, origin: Tuple[float, float], 
+                                   destination: Tuple[float, float], 
+                                   route: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Add intermediate waypoints for long journeys."""
+        waypoints = route.get("waypoints", [])
+        
+        # For very long journeys, add major cities as waypoints
+        if self._calculate_distance(origin, destination) > 500:
+            # Find major cities along the route
+            major_cities = self._find_major_cities_along_route(origin, destination)
+            
+            for city in major_cities:
+                waypoints.append({
+                    "location": {"lat": city["lat"], "lng": city["lng"]},
+                    "name": city["name"],
+                    "type": "major_city",
+                    "duration": 0  # Will be calculated
+                })
+        
+        return waypoints
+    
+    def _find_major_cities_along_route(self, origin: Tuple[float, float], 
+                                      destination: Tuple[float, float]) -> List[Dict[str, Any]]:
+        """Find major cities along a route."""
+        # This is a simplified version - in production, use a proper geographic database
+        major_cities = [
+            {"name": "Sacramento", "lat": 38.5816, "lng": -121.4944},
+            {"name": "Reno", "lat": 39.5296, "lng": -119.8138},
+            {"name": "Salt Lake City", "lat": 40.7608, "lng": -111.8910},
+            {"name": "Denver", "lat": 39.7392, "lng": -104.9903},
+            {"name": "Kansas City", "lat": 39.0997, "lng": -94.5786},
+            {"name": "St. Louis", "lat": 38.6270, "lng": -90.1994},
+            {"name": "Nashville", "lat": 36.1627, "lng": -86.7816},
+            {"name": "Atlanta", "lat": 33.7490, "lng": -84.3880},
+            {"name": "Charlotte", "lat": 35.2271, "lng": -80.8431},
+            {"name": "Richmond", "lat": 37.5407, "lng": -77.4360}
+        ]
+        
+        # Filter cities that are roughly along the route
+        route_cities = []
+        for city in major_cities:
+            city_coords = (city["lat"], city["lng"])
+            
+            # Check if city is within reasonable distance of the route
+            if self._is_point_near_route(origin, destination, city_coords, max_distance=100):
+                route_cities.append(city)
+        
+        return route_cities[:3]  # Limit to 3 cities
+    
+    def _is_point_near_route(self, start: Tuple[float, float], end: Tuple[float, float], 
+                            point: Tuple[float, float], max_distance: float = 100) -> bool:
+        """Check if a point is near a route line."""
+        # Calculate distance from point to line segment
+        # This is a simplified calculation
+        start_lat, start_lng = start
+        end_lat, end_lng = end
+        point_lat, point_lng = point
+        
+        # Calculate distance using haversine formula
+        distance = self._calculate_distance(start, point)
+        
+        return distance <= max_distance 

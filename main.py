@@ -224,30 +224,25 @@ class SmartTravelPlanner:
                     preferences=travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs)
                 )
                 logger.info(f"Journey planned: {journey_plan.get('travel_mode', 'unknown')} mode, {journey_plan.get('total_distance', 0):.1f} km")
+                
+                # For routes, pass the full route description to planning agent
+                planning_destination = destination  # Use the full route description
+            else:
+                # For single destinations, use the primary destination
+                planning_destination = destination_info["primary_destination"]
             
             # Plan trip logistics with route optimization
             trip_logistics_planner = TripLogisticsPlanner()
             
-            # Extract destinations for route optimization
-            destinations = self._extract_destinations_from_preferences(travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs))
-            
-            # Optimize the route if multiple destinations
-            if len(destinations) > 1:
-                optimized_route = trip_logistics_planner.optimize_multi_destination_route(
-                    starting_point, destinations, travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs)
-                )
-                
-                # Update preferences with optimized route
-                travel_prefs_dict = travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs)
-                travel_prefs_dict["optimized_route"] = optimized_route
-                travel_prefs_dict["route_notes"] = optimized_route.get("optimization_notes", "")
-                
-                # Use the optimized route for logistics planning
-                main_destination = optimized_route["route"][1] if len(optimized_route["route"]) > 1 else destinations[0]
+            # Use the parsed destination info instead of extracting from preferences
+            if destination_info["type"] == "route":
+                # For routes, use the end destination
+                main_destination = destination_info["end"]
             else:
-                main_destination = destinations[0] if destinations else "Unknown"
+                # For single destinations, use the primary destination
+                main_destination = destination_info["primary_destination"]
             
-            # Plan logistics using the optimized route
+            # Plan logistics using the correct destination
             trip_logistics = trip_logistics_planner.plan_complete_trip(
                 starting_point, main_destination, start_date, end_date, travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs)
             )
@@ -262,7 +257,7 @@ class SmartTravelPlanner:
             # Step 3: Create the itinerary
             logger.info("Step 3: Creating itinerary...")
             itinerary = self.planning_agent.create_itinerary(
-                destination=destination,
+                destination=planning_destination,
                 start_date=start_dt.isoformat() if hasattr(start_dt, "isoformat") else str(start_dt),
                 end_date=end_dt.isoformat() if hasattr(end_dt, "isoformat") else str(end_dt),
                 preferences=travel_prefs.model_dump() if hasattr(travel_prefs, "model_dump") else dict(travel_prefs),
@@ -720,7 +715,7 @@ class SmartTravelPlanner:
                 logistics_dict = {
                     "departure_info": {
                         "from": trip_logistics.departure_leg.from_location if trip_logistics.departure_leg else starting_point,
-                        "to": trip_logistics.departure_leg.to_location if trip_logistics.departure_leg else "Unknown",
+                        "to": trip_logistics.departure_leg.to_location if trip_logistics.departure_leg else destination,
                         "departure_time": trip_logistics.departure_leg.departure_time if trip_logistics.departure_leg else "09:00",
                         "arrival_time": trip_logistics.departure_leg.arrival_time if trip_logistics.departure_leg else "Unknown",
                         "duration": trip_logistics.departure_leg.duration_hours if trip_logistics.departure_leg else 0,
@@ -729,7 +724,7 @@ class SmartTravelPlanner:
                         "notes": trip_logistics.departure_leg.notes if trip_logistics.departure_leg else ""
                     },
                     "return_info": {
-                        "from": trip_logistics.return_leg.from_location if trip_logistics.return_leg else "Unknown",
+                        "from": trip_logistics.return_leg.from_location if trip_logistics.return_leg else destination,
                         "to": trip_logistics.return_leg.to_location if trip_logistics.return_leg else starting_point,
                         "departure_time": trip_logistics.return_leg.departure_time if trip_logistics.return_leg else "16:00",
                         "arrival_time": trip_logistics.return_leg.arrival_time if trip_logistics.return_leg else "Unknown",
@@ -752,7 +747,7 @@ class SmartTravelPlanner:
             itinerary["trip_logistics"] = logistics_dict
             itinerary["starting_point"] = starting_point
             
-            # Add journey plan if available
+            # Add journey plan if available (this takes precedence for route planning)
             if journey_plan:
                 itinerary["journey_plan"] = journey_plan
                 
@@ -760,11 +755,19 @@ class SmartTravelPlanner:
                 if journey_plan.get("stops"):
                     self._add_journey_stops_to_itinerary(itinerary, journey_plan["stops"])
                 
-                # Add journey costs to total
+                # For route planning, use journey plan costs instead of trip logistics
                 if journey_plan.get("total_cost"):
+                    # Remove any existing transportation costs to avoid double counting
+                    if "cost_breakdown" in itinerary:
+                        # Subtract existing transportation costs
+                        existing_transport = itinerary["cost_breakdown"].get("transportation", 0)
+                        itinerary["total_cost"] -= existing_transport
+                        itinerary["cost_breakdown"]["transportation"] = 0
+                    
+                    # Add journey costs
                     itinerary["total_cost"] += journey_plan["total_cost"]
                     
-                    # Update cost breakdown
+                    # Update cost breakdown with journey costs
                     if "cost_breakdown" in itinerary:
                         journey_costs = journey_plan.get("costs", {})
                         for cost_type, amount in journey_costs.items():
@@ -773,12 +776,38 @@ class SmartTravelPlanner:
                             else:
                                 itinerary["cost_breakdown"][cost_type] = amount
                         
+                        # Ensure total is correct
                         itinerary["cost_breakdown"]["total"] = sum(
                             v for k, v in itinerary["cost_breakdown"].items() if k != "total"
                         )
+                
+                # Update trip logistics with journey plan info
+                if journey_plan.get("travel_mode"):
+                    logistics_dict["journey_mode"] = journey_plan["travel_mode"]
+                    logistics_dict["journey_distance"] = journey_plan.get("total_distance", 0)
+                    logistics_dict["journey_duration"] = journey_plan.get("total_duration", 0)
+                    
+                    # Update departure and return info with journey plan data
+                    if logistics_dict.get("departure_info"):
+                        logistics_dict["departure_info"]["mode"] = journey_plan["travel_mode"]
+                        logistics_dict["departure_info"]["notes"] = self._generate_departure_notes(
+                            starting_point, 
+                            logistics_dict["departure_info"]["to"], 
+                            journey_plan["travel_mode"], 
+                            journey_plan.get("total_distance", 0)
+                        )
+                    
+                    if logistics_dict.get("return_info"):
+                        logistics_dict["return_info"]["mode"] = journey_plan["travel_mode"]
+                        logistics_dict["return_info"]["notes"] = self._generate_return_notes(
+                            logistics_dict["return_info"]["from"], 
+                            starting_point, 
+                            journey_plan["travel_mode"], 
+                            journey_plan.get("total_distance", 0)
+                        )
             
-            # Add departure/arrival costs to total cost
-            if logistics_dict.get("total_travel_cost"):
+            # Only add trip logistics costs if no journey plan exists (for non-route trips)
+            elif logistics_dict.get("total_travel_cost"):
                 itinerary["total_cost"] += logistics_dict["total_travel_cost"]
                 
                 # Update cost breakdown
@@ -913,16 +942,21 @@ class SmartTravelPlanner:
         if distance < 100:
             return "car"
         
-        # For medium distances (100-500 km), consider budget
-        elif distance < 500:
+        # For medium distances (100-800 km), consider budget and preferences
+        elif distance < 800:
+            # Check if user specified travel mode in preferences
+            if "travel_mode" in preferences:
+                return preferences["travel_mode"]
+            
+            # For moderate distances, prefer car unless budget constraints
             if budget_level == "budget":
-                return "bus"
+                return "bus"  # Budget option
             elif budget_level == "luxury":
-                return "plane"
+                return "plane"  # Luxury option
             else:
                 return "car"  # Default to car for moderate budget
         
-        # For long distances (> 500 km), prefer plane
+        # For long distances (> 800 km), prefer plane
         else:
             return "plane"
     

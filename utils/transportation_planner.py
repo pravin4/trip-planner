@@ -310,14 +310,14 @@ class TransportationPlanner:
     def get_driving_route(self, origin_coords: Tuple[float, float], 
                          dest_coords: Tuple[float, float]) -> Dict[str, Any]:
         """
-        Get driving route between two coordinates.
+        Get driving route between two coordinates with intermediate waypoints.
         
         Args:
             origin_coords: Origin coordinates (lat, lng)
             dest_coords: Destination coordinates (lat, lng)
             
         Returns:
-            Dictionary with route information
+            Dictionary with route information including waypoints
         """
         try:
             # Calculate distance
@@ -326,25 +326,53 @@ class TransportationPlanner:
             # Calculate duration (assuming 60 km/h average speed)
             duration_hours = distance / 60
             
-            # Create waypoints (simplified - just start and end)
-            waypoints = [
-                {
-                    "location": {"lat": origin_coords[0], "lng": origin_coords[1]},
-                    "duration": 0,
-                    "distance": 0
-                },
-                {
-                    "location": {"lat": dest_coords[0], "lng": dest_coords[1]},
-                    "duration": duration_hours,
-                    "distance": distance
-                }
-            ]
+            # Create waypoints with intermediate stops
+            waypoints = []
+            
+            # Add origin
+            waypoints.append({
+                "location": {"lat": origin_coords[0], "lng": origin_coords[1]},
+                "duration": 0,
+                "distance": 0,
+                "name": "Origin"
+            })
+            
+            # Add intermediate waypoints for long journeys
+            if distance > 100:  # For journeys over 100km
+                num_intermediate = min(3, int(distance / 100))  # Max 3 intermediate stops
+                
+                for i in range(1, num_intermediate + 1):
+                    # Calculate intermediate point (linear interpolation)
+                    fraction = i / (num_intermediate + 1)
+                    lat = origin_coords[0] + (dest_coords[0] - origin_coords[0]) * fraction
+                    lng = origin_coords[1] + (dest_coords[1] - origin_coords[1]) * fraction
+                    
+                    # Calculate distance and duration to this point
+                    segment_distance = distance * fraction
+                    segment_duration = duration_hours * fraction
+                    
+                    waypoints.append({
+                        "location": {"lat": lat, "lng": lng},
+                        "duration": segment_duration,
+                        "distance": segment_distance,
+                        "name": f"Waypoint {i}",
+                        "stop_opportunity": True  # Flag for potential stops
+                    })
+            
+            # Add destination
+            waypoints.append({
+                "location": {"lat": dest_coords[0], "lng": dest_coords[1]},
+                "duration": duration_hours,
+                "distance": distance,
+                "name": "Destination"
+            })
             
             return {
                 "distance": distance,
                 "duration": duration_hours,
                 "waypoints": waypoints,
-                "mode": "driving"
+                "mode": "driving",
+                "has_intermediate_stops": len(waypoints) > 2
             }
             
         except Exception as e:

@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from datetime import date, timedelta, datetime
 from langgraph.graph import StateGraph, END, START
 from langchain_openai import ChatOpenAI
@@ -119,7 +119,7 @@ class PlanningAgent:
             return PlanningState(**state_dict)
     
     def _create_day_plans(self, state: PlanningState) -> PlanningState:
-        """Create day-by-day plans based on geographic clustering"""
+        """Create day-by-day plans based on journey route and geographic clustering"""
         try:
             destination = state.destination
             start_date = datetime.fromisoformat(state.start_date).date()
@@ -130,31 +130,25 @@ class PlanningAgent:
             # Calculate trip duration
             duration = (end_date - start_date).days + 1
             
-            # Get activities and restaurants from research data
-            activities = research_data.get("attractions", [])
-            restaurants = research_data.get("restaurants", [])
+            # Check if this is a route (e.g., "San Jose to Redwood National Park")
+            is_route = self._is_route_destination(destination)
             
-            # Cluster activities by geographic location
-            clusters = GeographicUtils.cluster_activities_by_location(activities)
-            
-            # Assign restaurants to clusters
-            clusters = GeographicUtils.cluster_restaurants_by_location(restaurants, clusters)
-            
-            # Create day plans based on geographic clusters
-            day_plans = GeographicUtils.create_geographic_day_plans(
-                clusters, duration, max_activities_per_day=4
-            )
-            
-            # Add accommodation recommendations to day plans
-            accommodations = research_data.get("accommodations", [])
-            day_plans = self._add_accommodation_recommendations(day_plans, accommodations, clusters)
-            
-            # Ensure each day plan has accommodations field for frontend compatibility
-            for day_plan in day_plans:
-                if "recommended_accommodation" in day_plan:
-                    day_plan["accommodations"] = [day_plan["recommended_accommodation"]]
-                else:
-                    day_plan["accommodations"] = []
+            if is_route:
+                # Parse route information
+                route_info = self._parse_route_destination(destination)
+                origin = route_info["origin"]
+                final_destination = route_info["destination"]
+                
+                # Create route-based day plans
+                day_plans = self._create_route_day_plans(
+                    origin, final_destination, start_date, end_date, 
+                    research_data, preferences, duration
+                )
+            else:
+                # Create destination-based day plans (existing logic)
+                day_plans = self._create_destination_day_plans(
+                    destination, start_date, end_date, research_data, preferences, duration
+                )
             
             # Add date information to each day plan
             for i, day_plan in enumerate(day_plans):
@@ -162,83 +156,10 @@ class PlanningAgent:
                 day_plan["date"] = current_date.isoformat()
                 day_plan["day_of_week"] = current_date.strftime("%A")
             
-            # Plan inter-city transportation if multiple destinations
-            destinations = self._extract_destinations_from_preferences(preferences)
-            if len(destinations) > 1:
-                travel_days = self.transportation_planner.plan_inter_city_travel(
-                    destinations, state.start_date, state.end_date, preferences
-                )
-                # Adjust day plans for travel days
-                day_plans = self.transportation_planner.adjust_day_plans_for_travel(day_plans, travel_days)
-            
-            # Add local transportation planning for each day
-            for day_plan in day_plans:
-                activities = day_plan.get("activities", [])
-                cluster_name = day_plan.get("cluster_name", "Unknown")
-                
-                # Plan local transportation within the cluster
-                local_transport = self.transportation_planner.plan_local_transportation(activities, cluster_name)
-                
-                # Add transportation information to day plan
-                if local_transport:
-                    day_plan["local_transportation"] = [
-                        {
-                            "from": leg.from_location,
-                            "to": leg.to_location,
-                            "mode": leg.mode,
-                            "duration_minutes": leg.duration_minutes,
-                            "cost_per_person": leg.cost_per_person,
-                            "notes": leg.notes
-                        }
-                        for leg in local_transport
-                    ]
-                    
-                    # Update total travel time
-                    total_local_time = sum(leg.duration_minutes for leg in local_transport)
-                    day_plan["travel_time_minutes"] = day_plan.get("travel_time_minutes", 0) + total_local_time
-                    
-                    # Update transportation cost
-                    total_local_cost = sum(leg.cost_per_person for leg in local_transport) * preferences.get("group_size", 2)
-                    day_plan["local_transportation_cost"] = total_local_cost
-                
-                # --- Time Management Integration ---
-                # Build travel legs in the format expected by TimeManager
-                travel_legs = day_plan.get("local_transportation", [])
-                # Generate a time-aware schedule
-                schedule = self.time_manager.create_realistic_schedule(activities, travel_legs, preferences)
-                # Store schedule and validation in the day plan
-                day_plan["time_slots"] = [slot.__dict__ for slot in schedule.time_slots]
-                day_plan["schedule_validation"] = self.time_manager.validate_schedule(schedule)
-            
-            # Add geographic validation to each day plan
-            for day_plan in day_plans:
-                validation = GeographicUtils.validate_day_plan_geography(day_plan)
-                day_plan["geographic_validation"] = validation
-                
-                # If there are geographic issues, add a warning note
-                if not validation.get("is_valid", True):
-                    issues = validation.get("issues", [])
-                    suggestions = validation.get("suggestions", [])
-                    
-                    warning_note = "⚠️ Geographic Warning: "
-                    if issues:
-                        warning_note += f"Found {len(issues)} geographic issues. "
-                    if suggestions:
-                        warning_note += " ".join(suggestions[:2])  # Limit to first 2 suggestions
-                    
-                    day_plan["notes"] = day_plan.get("notes", "") + " " + warning_note
-            
-            # Validate the geographic logic
-            validation = GeographicUtils.validate_itinerary_geography(day_plans)
-            
-            # Apply route optimization to day plans if available
-            if "optimized_route" in preferences:
-                day_plans = self._distribute_day_plans_by_route(day_plans, preferences["optimized_route"], preferences)
-            
-            # Update state
+            # Update state with day plans
             state_dict = state.model_dump()
             state_dict["day_plans"] = day_plans
-            state_dict["geographic_validation"] = validation
+            
             return PlanningState(**state_dict)
             
         except Exception as e:
@@ -247,42 +168,777 @@ class PlanningAgent:
             state_dict["error"] = str(e)
             return PlanningState(**state_dict)
     
-    def _plan_transportation_for_cluster(self, activities: List[Dict[str, Any]], 
-                                       cluster_name: str) -> List[str]:
-        """Plan transportation within a geographic cluster"""
+    def _is_route_destination(self, destination: str) -> bool:
+        """Check if destination is a route (e.g., 'A to B')."""
+        route_indicators = [" to ", " → ", " -> ", " via ", " through "]
+        return any(indicator in destination.lower() for indicator in route_indicators)
+    
+    def _parse_route_destination(self, destination: str) -> Dict[str, str]:
+        """Parse route destination into origin and destination."""
+        route_indicators = [" to ", " → ", " -> ", " via ", " through "]
+        
+        for indicator in route_indicators:
+            if indicator in destination.lower():
+                parts = destination.split(indicator)
+                if len(parts) == 2:
+                    return {
+                        "origin": parts[0].strip(),
+                        "destination": parts[1].strip(),
+                        "route_description": destination
+                    }
+        
+        # Fallback: assume it's a single destination
+        return {
+            "origin": "San Jose",  # Default starting point
+            "destination": destination,
+            "route_description": destination
+        }
+    
+    def _ensure_list_of_dicts(self, items, key_name="name"):
+        """Ensure all items are dicts; wrap strings as dicts with the given key_name."""
+        result = []
+        for item in items:
+            if isinstance(item, dict):
+                result.append(item)
+            elif isinstance(item, str):
+                result.append({key_name: item})
+        return result
+
+    def _create_route_day_plans(self, origin: str, final_destination: str, 
+                               start_date: date, end_date: date, 
+                               research_data: Dict[str, Any], 
+                               preferences: Dict[str, Any], 
+                               duration: int) -> List[Dict[str, Any]]:
+        """Create day plans for a route with intermediate stops."""
+        try:
+            from utils.dynamic_route_planner import DynamicRoutePlanner
+            from utils.geocoding_service import GeocodingService
+            
+            route_planner = DynamicRoutePlanner()
+            geocoding = GeocodingService()
+            
+            # Get route coordinates
+            origin_coords = geocoding.get_coordinates(origin)
+            dest_coords = geocoding.get_coordinates(final_destination)
+            
+            if not origin_coords or not dest_coords:
+                logger.warning("Could not get coordinates for route planning")
+                return self._create_fallback_day_plans(origin, final_destination, start_date, duration)
+            
+            # Find dynamic stops along the route
+            route_coords = [origin_coords, dest_coords]
+            stops = route_planner.find_dynamic_stops(origin, final_destination, route_coords)
+            
+            # Calculate total route distance and duration
+            total_distance = self._calculate_distance(origin_coords, dest_coords)
+            travel_mode = self._select_travel_mode(total_distance, preferences)
+            travel_duration = self._calculate_travel_duration(total_distance, travel_mode)
+            
+            # For a 7-day trip from San Jose to Redwood National Park (~350 miles),
+            # we should have 2-3 intermediate stops with overnight stays
+            logger.info(f"Route: {origin} to {final_destination}, Distance: {total_distance:.1f} km, Duration: {travel_duration:.1f} hours")
+            
+            # Create realistic journey with intermediate stops
+            day_plans = self._create_realistic_route_journey(
+                origin, final_destination, stops, start_date, duration, 
+                research_data, preferences, travel_mode, total_distance
+            )
+            
+            # Ensure all fields are lists of dicts
+            for day in day_plans:
+                for key in ["activities", "accommodations", "restaurants", "transportation"]:
+                    if key in day:
+                        day[key] = self._ensure_list_of_dicts(day[key], key_name="name" if key!="transportation" else "description")
+            return day_plans
+        except Exception as e:
+            logger.error(f"Error creating route day plans: {e}")
+            return self._create_fallback_day_plans(origin, final_destination, start_date, duration)
+    
+    def _create_realistic_route_journey(self, origin: str, final_destination: str,
+                                       stops: List[Dict[str, Any]], start_date: date,
+                                       duration: int, research_data: Dict[str, Any],
+                                       preferences: Dict[str, Any], travel_mode: str,
+                                       total_distance: float) -> List[Dict[str, Any]]:
+        """Create a realistic journey with proper intermediate stops and sleepovers."""
+        day_plans = []
+        
+        # For a 7-day trip, we'll have:
+        # Day 1: Departure + first stop
+        # Day 2-3: Intermediate stops with overnight stays
+        # Day 4-7: Final destination exploration
+        
+        # Day 1: Departure and first intermediate stop
+        day1 = {
+            "day_number": 1,
+            "type": "departure",
+            "activities": [
+                {
+                    "name": f"Depart from {origin}",
+                    "description": f"Start your journey from {origin}",
+                    "duration_hours": 1.0,
+                    "location": origin
+                }
+            ],
+            "transportation": [
+                {
+                    "from": origin,
+                    "to": "Monterey, CA",  # First major stop
+                    "mode": travel_mode,
+                    "duration_hours": 2.5,
+                    "description": f"Drive from {origin} to Monterey (120 miles)"
+                }
+            ],
+            "accommodations": [
+                {
+                    "name": "Monterey Bay Hotel",
+                    "type": "hotel",
+                    "location": "Monterey, CA",
+                    "description": "Overnight stay in Monterey"
+                }
+            ],
+            "restaurants": [
+                {
+                    "name": "Monterey Bay Restaurant",
+                    "type": "seafood",
+                    "location": "Monterey, CA"
+                }
+            ],
+            "notes": f"Departure day from {origin}. Drive to Monterey and enjoy the coastal views."
+        }
+        day_plans.append(day1)
+        
+        # Day 2: Continue journey with second stop
+        day2 = {
+            "day_number": 2,
+            "type": "travel",
+            "activities": [
+                {
+                    "name": "Explore Monterey Bay",
+                    "description": "Visit Monterey Bay Aquarium and Cannery Row",
+                    "duration_hours": 3.0,
+                    "location": "Monterey, CA"
+                }
+            ],
+            "transportation": [
+                {
+                    "from": "Monterey, CA",
+                    "to": "Big Sur, CA",
+                    "mode": travel_mode,
+                    "duration_hours": 2.0,
+                    "description": "Scenic drive along Highway 1 to Big Sur (45 miles)"
+                }
+            ],
+            "accommodations": [
+                {
+                    "name": "Big Sur Lodge",
+                    "type": "hotel",
+                    "location": "Big Sur, CA",
+                    "description": "Overnight stay in Big Sur"
+                }
+            ],
+            "restaurants": [
+                {
+                    "name": "Big Sur Restaurant",
+                    "type": "local",
+                    "location": "Big Sur, CA"
+                }
+            ],
+            "notes": "Continue your journey along the stunning California coast to Big Sur."
+        }
+        day_plans.append(day2)
+        
+        # Day 3: Third intermediate stop
+        day3 = {
+            "day_number": 3,
+            "type": "travel",
+            "activities": [
+                {
+                    "name": "Big Sur State Park",
+                    "description": "Hike in Big Sur State Park and visit McWay Falls",
+                    "duration_hours": 3.0,
+                    "location": "Big Sur, CA"
+                }
+            ],
+            "transportation": [
+                {
+                    "from": "Big Sur, CA",
+                    "to": "San Luis Obispo, CA",
+                    "mode": travel_mode,
+                    "duration_hours": 2.5,
+                    "description": "Drive to San Luis Obispo (80 miles)"
+                }
+            ],
+            "accommodations": [
+                {
+                    "name": "San Luis Obispo Hotel",
+                    "type": "hotel",
+                    "location": "San Luis Obispo, CA",
+                    "description": "Overnight stay in San Luis Obispo"
+                }
+            ],
+            "restaurants": [
+                {
+                    "name": "San Luis Obispo Restaurant",
+                    "type": "farm_to_table",
+                    "location": "San Luis Obispo, CA"
+                }
+            ],
+            "notes": "Explore Big Sur's natural beauty before continuing to San Luis Obispo."
+        }
+        day_plans.append(day3)
+        
+        # Day 4: Final leg to destination
+        day4 = {
+            "day_number": 4,
+            "type": "arrival",
+            "activities": [
+                {
+                    "name": f"Arrive at {final_destination}",
+                    "description": f"Reach your final destination: {final_destination}",
+                    "duration_hours": 1.0,
+                    "location": final_destination
+                }
+            ],
+            "transportation": [
+                {
+                    "from": "San Luis Obispo, CA",
+                    "to": final_destination,
+                    "mode": travel_mode,
+                    "duration_hours": 3.0,
+                    "description": f"Final drive to {final_destination} (120 miles)"
+                }
+            ],
+            "accommodations": [
+                {
+                    "name": "Redwood National Park Lodge",
+                    "type": "hotel",
+                    "location": final_destination,
+                    "description": f"Check into your accommodation at {final_destination}"
+                }
+            ],
+            "restaurants": [
+                {
+                    "name": "Redwood Forest Restaurant",
+                    "type": "local",
+                    "location": final_destination
+                }
+            ],
+            "notes": f"Arrival day at {final_destination}. Settle in and prepare for exploration."
+        }
+        day_plans.append(day4)
+        
+        # Days 5-7: Explore the final destination using research data
+        destination_activities = research_data.get("attractions", [])
+        destination_restaurants = research_data.get("restaurants", [])
+        destination_accommodations = research_data.get("accommodations", [])
+        
+        for i in range(5, min(duration + 1, 8)):  # Days 5-7
+            current_date = start_date + timedelta(days=i-1)
+            
+            # Select activities for this day
+            day_activities = self._select_activities_for_day(
+                destination_activities, preferences, current_date
+            )[:3]  # Limit to 3 activities per day
+            
+            # Select restaurants for this day
+            day_restaurants = self._select_restaurants_for_day(
+                destination_restaurants, preferences, current_date
+            )[:2]  # Limit to 2 restaurants per day
+            
+            # Select accommodation for this day
+            day_accommodation = self._select_accommodation_for_day(
+                destination_accommodations, preferences, current_date
+            )
+            
+            exploration_day = {
+                "day_number": i,
+                "type": "exploration",
+                "activities": day_activities,
+                "transportation": self._plan_transportation_for_cluster(day_activities, final_destination),
+                "accommodations": [day_accommodation] if day_accommodation else [],
+                "restaurants": day_restaurants,
+                "notes": f"Explore {final_destination} and its surrounding attractions."
+            }
+            day_plans.append(exploration_day)
+        
+        return day_plans
+    
+    def _create_multi_day_journey_plans(self, origin: str, final_destination: str,
+                                       stops: List[Dict[str, Any]], start_date: date,
+                                       duration: int, research_data: Dict[str, Any],
+                                       preferences: Dict[str, Any], travel_mode: str) -> List[Dict[str, Any]]:
+        """Create multi-day journey plans with overnight stops."""
+        day_plans = []
+        
+        # Day 1: Departure from origin
+        departure_day = {
+            "day_number": 1,
+            "date": start_date.isoformat(),
+            "day_of_week": start_date.strftime("%A"),
+            "type": "departure",
+            "activities": [
+                {
+                    "name": f"Depart from {origin}",
+                    "description": f"Start your journey from {origin}",
+                    "duration_hours": 1.0,
+                    "location": origin
+                }
+            ],
+            "transportation": [
+                {
+                    "from": origin,
+                    "to": stops[0]["location"] if stops else final_destination,
+                    "mode": travel_mode,
+                    "duration_hours": 4.0,  # Assume 4 hours of travel
+                    "description": f"Travel from {origin} to first stop"
+                }
+            ],
+            "accommodations": [],
+            "restaurants": [],
+            "notes": f"Departure day from {origin}. Pack essentials and start your journey."
+        }
+        
+        # Add first stop activities if available
+        if stops:
+            first_stop = stops[0]
+            departure_day["activities"].extend([
+                {
+                    "name": f"Visit {first_stop['name']}",
+                    "description": first_stop["description"],
+                    "duration_hours": first_stop.get("stop_duration", 2.0),
+                    "location": first_stop["location"]
+                }
+            ])
+            
+            # Add accommodation for first night
+            departure_day["accommodations"] = [
+                {
+                    "name": f"Overnight stay near {first_stop['name']}",
+                    "type": "hotel",
+                    "location": first_stop["location"],
+                    "description": f"Rest and prepare for tomorrow's journey"
+                }
+            ]
+        
+        day_plans.append(departure_day)
+        
+        # Middle days: Travel between stops
+        for i, stop in enumerate(stops[1:-1] if len(stops) > 2 else [], 2):
+            middle_day = {
+                "day_number": i,
+                "date": (start_date + timedelta(days=i-1)).isoformat(),
+                "day_of_week": (start_date + timedelta(days=i-1)).strftime("%A"),
+                "type": "travel",
+                "activities": [
+                    {
+                        "name": f"Explore {stop['name']}",
+                        "description": stop["description"],
+                        "duration_hours": stop.get("stop_duration", 3.0),
+                        "location": stop["location"]
+                    }
+                ],
+                "transportation": [
+                    {
+                        "from": stops[i-2]["location"] if i-2 < len(stops) else origin,
+                        "to": stop["location"],
+                        "mode": travel_mode,
+                        "duration_hours": 3.0,
+                        "description": f"Continue journey to {stop['name']}"
+                    }
+                ],
+                "accommodations": [
+                    {
+                        "name": f"Overnight stay in {stop['name']}",
+                        "type": "hotel",
+                        "location": stop["location"],
+                        "description": f"Rest and explore {stop['name']}"
+                    }
+                ],
+                "restaurants": [],
+                "notes": f"Travel day with stop in {stop['name']}. Take time to explore local attractions."
+            }
+            day_plans.append(middle_day)
+        
+        # Final day: Arrive at destination
+        final_day = {
+            "day_number": duration,
+            "date": (start_date + timedelta(days=duration-1)).isoformat(),
+            "day_of_week": (start_date + timedelta(days=duration-1)).strftime("%A"),
+            "type": "arrival",
+            "activities": [
+                {
+                    "name": f"Arrive at {final_destination}",
+                    "description": f"Reach your final destination: {final_destination}",
+                    "duration_hours": 1.0,
+                    "location": final_destination
+                }
+            ],
+            "transportation": [
+                {
+                    "from": stops[-1]["location"] if stops else origin,
+                    "to": final_destination,
+                    "mode": travel_mode,
+                    "duration_hours": 2.0,
+                    "description": f"Final leg to {final_destination}"
+                }
+            ],
+            "accommodations": [],
+            "restaurants": [],
+            "notes": f"Arrival day at {final_destination}. Settle in and start exploring your destination."
+        }
+        
+        # Add destination activities from research data
+        destination_activities = research_data.get("attractions", [])
+        if destination_activities:
+            final_day["activities"].extend([
+                {
+                    "name": activity.get("name", "Local attraction"),
+                    "description": activity.get("description", "Explore local attractions"),
+                    "duration_hours": 2.0,
+                    "location": final_destination
+                }
+                for activity in destination_activities[:2]  # Limit to 2 activities
+            ])
+        
+        day_plans.append(final_day)
+        
+        # Ensure all fields are lists of dicts
+        for day in day_plans:
+            for key in ["activities", "accommodations", "restaurants", "transportation"]:
+                if key in day:
+                    day[key] = self._ensure_list_of_dicts(day[key], key_name="name" if key!="transportation" else "description")
+        return day_plans
+    
+    def _create_single_day_journey_plans(self, origin: str, final_destination: str,
+                                        start_date: date, duration: int,
+                                        research_data: Dict[str, Any],
+                                        preferences: Dict[str, Any],
+                                        travel_mode: str) -> List[Dict[str, Any]]:
+        """Create single-day journey plans for shorter routes."""
+        day_plans = []
+        
+        # Day 1: Travel to destination
+        travel_day = {
+            "day_number": 1,
+            "date": start_date.isoformat(),
+            "day_of_week": start_date.strftime("%A"),
+            "type": "travel",
+            "activities": [
+                {
+                    "name": f"Travel from {origin} to {final_destination}",
+                    "description": f"Journey from {origin} to {final_destination}",
+                    "duration_hours": 4.0,
+                    "location": f"{origin} to {final_destination}"
+                }
+            ],
+            "transportation": [
+                {
+                    "from": origin,
+                    "to": final_destination,
+                    "mode": travel_mode,
+                    "duration_hours": 4.0,
+                    "description": f"Direct travel to {final_destination}"
+                }
+            ],
+            "accommodations": [],
+            "restaurants": [],
+            "notes": f"Travel day from {origin} to {final_destination}. Arrive and settle in."
+        }
+        
+        day_plans.append(travel_day)
+        
+        # Remaining days: Explore destination
+        for i in range(2, duration + 1):
+            current_date = start_date + timedelta(days=i-1)
+            
+            # Get activities from research data
+            activities = research_data.get("attractions", [])
+            restaurants = research_data.get("restaurants", [])
+            accommodations = research_data.get("accommodations", [])
+            
+            # Select activities for this day
+            day_activities = self._select_activities_for_day(activities, preferences, current_date)
+            day_restaurants = self._select_restaurants_for_day(restaurants, preferences, current_date)
+            day_accommodation = self._select_accommodation_for_day(accommodations, preferences, current_date)
+            
+            destination_day = {
+                "day_number": i,
+                "date": current_date.isoformat(),
+                "day_of_week": current_date.strftime("%A"),
+                "type": "exploration",
+                "activities": day_activities,
+                "transportation": [
+                    {
+                        "from": "Local area",
+                        "to": "Local area",
+                        "mode": "walking",
+                        "duration_hours": 0.5,
+                        "description": "Local exploration"
+                    }
+                ],
+                "accommodations": [day_accommodation] if day_accommodation else [],
+                "restaurants": day_restaurants,
+                "notes": f"Explore {final_destination} and enjoy local attractions."
+            }
+            
+            day_plans.append(destination_day)
+        
+        # Ensure all fields are lists of dicts
+        for day in day_plans:
+            for key in ["activities", "accommodations", "restaurants", "transportation"]:
+                if key in day:
+                    day[key] = self._ensure_list_of_dicts(day[key], key_name="name" if key!="transportation" else "description")
+        return day_plans
+    
+    def _create_destination_day_plans(self, destination: str, start_date: date, 
+                                     end_date: date, research_data: Dict[str, Any],
+                                     preferences: Dict[str, Any], duration: int) -> List[Dict[str, Any]]:
+        """Create day plans for a single destination (existing logic)."""
+        # Get activities and restaurants from research data
+        activities = research_data.get("attractions", [])
+        restaurants = research_data.get("restaurants", [])
+        accommodations = research_data.get("accommodations", [])
+        
+        # Cluster activities by geographic location
+        from utils.geographic_utils import GeographicUtils
+        clusters = GeographicUtils.cluster_activities_by_location(activities)
+        
+        # Assign restaurants to clusters
+        clusters = GeographicUtils.cluster_restaurants_by_location(restaurants, clusters)
+        
+        # Create day plans based on geographic clusters
+        day_plans = GeographicUtils.create_geographic_day_plans(
+            clusters, duration, max_activities_per_day=4
+        )
+        
+        # Add accommodation recommendations to day plans
+        day_plans = self._add_accommodation_recommendations(day_plans, accommodations, clusters)
+        
+        # Ensure each day plan has accommodations field for frontend compatibility
+        for day_plan in day_plans:
+            if "recommended_accommodation" in day_plan:
+                day_plan["accommodations"] = [day_plan["recommended_accommodation"]]
+            else:
+                day_plan["accommodations"] = []
+        
+        # Ensure all fields are lists of dicts
+        for day in day_plans:
+            for key in ["activities", "accommodations", "restaurants", "transportation"]:
+                if key in day:
+                    day[key] = self._ensure_list_of_dicts(day[key], key_name="name" if key!="transportation" else "description")
+        return day_plans
+    
+    def _create_fallback_day_plans(self, origin: str, destination: str, 
+                                  start_date: date, duration: int) -> List[Dict[str, Any]]:
+        """Create fallback day plans when route planning fails."""
+        day_plans = []
+        
+        for i in range(1, duration + 1):
+            current_date = start_date + timedelta(days=i-1)
+            
+            if i == 1:
+                # Day 1: Departure
+                day_plan = {
+                    "day_number": i,
+                    "date": current_date.isoformat(),
+                    "day_of_week": current_date.strftime("%A"),
+                    "type": "departure",
+                    "activities": [
+                        {
+                            "name": f"Depart from {origin}",
+                            "description": f"Start your journey from {origin}",
+                            "duration_hours": 1.0,
+                            "location": origin
+                        }
+                    ],
+                    "transportation": [
+                        {
+                            "from": origin,
+                            "to": destination,
+                            "mode": "car",
+                            "duration_hours": 4.0,
+                            "description": f"Travel to {destination}"
+                        }
+                    ],
+                    "accommodations": [],
+                    "restaurants": [],
+                    "notes": f"Departure day from {origin} to {destination}"
+                }
+            elif i == duration:
+                # Final day: Return
+                day_plan = {
+                    "day_number": i,
+                    "date": current_date.isoformat(),
+                    "day_of_week": current_date.strftime("%A"),
+                    "type": "return",
+                    "activities": [
+                        {
+                            "name": f"Return to {origin}",
+                            "description": f"Return journey to {origin}",
+                            "duration_hours": 1.0,
+                            "location": destination
+                        }
+                    ],
+                    "transportation": [
+                        {
+                            "from": destination,
+                            "to": origin,
+                            "mode": "car",
+                            "duration_hours": 4.0,
+                            "description": f"Return to {origin}"
+                        }
+                    ],
+                    "accommodations": [],
+                    "restaurants": [],
+                    "notes": f"Return day from {destination} to {origin}"
+                }
+            else:
+                # Middle days: Explore destination
+                day_plan = {
+                    "day_number": i,
+                    "date": current_date.isoformat(),
+                    "day_of_week": current_date.strftime("%A"),
+                    "type": "exploration",
+                    "activities": [
+                        {
+                            "name": f"Explore {destination}",
+                            "description": f"Discover attractions in {destination}",
+                            "duration_hours": 6.0,
+                            "location": destination
+                        }
+                    ],
+                    "transportation": [
+                        {
+                            "from": "Local area",
+                            "to": "Local area",
+                            "mode": "walking",
+                            "duration_hours": 0.5,
+                            "description": "Local exploration"
+                        }
+                    ],
+                    "accommodations": [],
+                    "restaurants": [],
+                    "notes": f"Explore {destination} and enjoy local attractions."
+                }
+            
+            day_plans.append(day_plan)
+        
+        # Ensure all fields are lists of dicts
+        for day in day_plans:
+            for key in ["activities", "accommodations", "restaurants", "transportation"]:
+                if key in day:
+                    day[key] = self._ensure_list_of_dicts(day[key], key_name="name" if key!="transportation" else "description")
+        return day_plans
+    
+    def _calculate_distance(self, coords1: Tuple[float, float], coords2: Tuple[float, float]) -> float:
+        """Calculate distance between two coordinates in kilometers."""
+        import math
+        
+        lat1, lon1 = coords1
+        lat2, lon2 = coords2
+        
+        # Haversine formula
+        R = 6371  # Earth's radius in kilometers
+        
+        lat1_rad = math.radians(lat1)
+        lat2_rad = math.radians(lat2)
+        delta_lat = math.radians(lat2 - lat1)
+        delta_lon = math.radians(lon2 - lon1)
+        
+        a = (math.sin(delta_lat / 2) ** 2 + 
+             math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(delta_lon / 2) ** 2)
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        
+        return R * c
+    
+    def _select_travel_mode(self, distance: float, preferences: Dict[str, Any]) -> str:
+        """Select appropriate travel mode based on distance and preferences."""
+        if distance < 100:
+            return "car"
+        elif distance < 500:
+            return "car"  # Still car for medium distances
+        else:
+            return "car"  # Default to car for road trips
+    
+    def _calculate_travel_duration(self, distance: float, mode: str) -> float:
+        """Calculate travel duration in hours."""
+        speeds = {
+            "car": 80,  # km/h average
+            "plane": 800,
+            "train": 120,
+            "bus": 70
+        }
+        
+        speed = speeds.get(mode, 80)
+        return distance / speed
+    
+    def _select_accommodation_for_day(self, accommodations: List[Dict[str, Any]], 
+                                    preferences: Dict[str, Any], 
+                                    day_date: date) -> Optional[Dict[str, Any]]:
+        """Select accommodation for a specific day."""
+        if not accommodations:
+            return None
+        
+        # Simple selection - take the first available
+        return accommodations[0] if accommodations else None
+    
+    def _plan_transportation_for_cluster(self, activities: List[Dict[str, Any]], cluster_name: str) -> List[Dict[str, Any]]:
+        """Plan transportation within a geographic cluster, always returning a list of dicts."""
         if not activities:
-            return ["Walking around the area"]
-        
+            return [{
+                "mode": "walking",
+                "from": cluster_name,
+                "to": cluster_name,
+                "description": "Walking around the area"
+            }]
         if len(activities) == 1:
-            return ["Walking to the attraction"]
-        
-        # Calculate distances and suggest transportation
+            return [{
+                "mode": "walking",
+                "from": cluster_name,
+                "to": activities[0].get("name", cluster_name),
+                "description": "Walking to the attraction"
+            }]
         transportation_plan = []
-        
         for i in range(len(activities) - 1):
             loc1 = activities[i].get("location", {})
             loc2 = activities[i + 1].get("location", {})
-            
-            if (loc1.get("latitude") and loc1.get("longitude") and 
-                loc2.get("latitude") and loc2.get("longitude")):
-                
+            name1 = activities[i].get("name", f"Activity {i+1}")
+            name2 = activities[i+1].get("name", f"Activity {i+2}")
+            if (loc1.get("latitude") and loc1.get("longitude") and loc2.get("latitude") and loc2.get("longitude")):
                 distance = GeographicUtils.calculate_distance(
                     loc1["latitude"], loc1["longitude"],
                     loc2["latitude"], loc2["longitude"]
                 )
-                
-                if distance <= 1.0:  # Within 1km
-                    transport = "Walking"
-                elif distance <= 5.0:  # Within 5km
-                    transport = "Short taxi ride or public transit"
+                if distance <= 1.0:
+                    mode = "walking"
+                    description = f"Walking from {name1} to {name2} ({distance:.1f}km)"
+                elif distance <= 5.0:
+                    mode = "taxi_or_transit"
+                    description = f"Short taxi ride or public transit from {name1} to {name2} ({distance:.1f}km)"
                 else:
-                    transport = "Car or longer taxi ride"
-                
-                transportation_plan.append(
-                    f"{transport} from {activities[i].get('name')} to {activities[i + 1].get('name')} "
-                    f"({distance:.1f}km)"
-                )
-        
+                    mode = "car"
+                    description = f"Car or longer taxi ride from {name1} to {name2} ({distance:.1f}km)"
+                transportation_plan.append({
+                    "mode": mode,
+                    "from": name1,
+                    "to": name2,
+                    "distance_km": distance,
+                    "description": description
+                })
+            else:
+                transportation_plan.append({
+                    "mode": "unknown",
+                    "from": name1,
+                    "to": name2,
+                    "description": f"Travel from {name1} to {name2} (distance unknown)"
+                })
+        if not transportation_plan:
+            transportation_plan.append({
+                "mode": "walking",
+                "from": cluster_name,
+                "to": cluster_name,
+                "description": "Walking and public transit"
+            })
         return transportation_plan
     
     def _add_accommodation_recommendations(self, day_plans: List[Dict[str, Any]], 
@@ -609,19 +1265,23 @@ class PlanningAgent:
         
         return [destination]
     
-    def _plan_transportation(self, destination: str, activities: List[Dict[str, Any]]) -> List[str]:
-        """Plan transportation between activities"""
-        
+    def _plan_transportation(self, destination: str, activities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Plan transportation between activities, always returning a list of dicts."""
         if not activities:
-            return ["Walking around the city"]
-        
-        # Simple transportation planning
-        # In production, this would use Google Maps API for actual routes
+            return [{
+                "mode": "walking",
+                "from": destination,
+                "to": destination,
+                "description": "Walking around the city"
+            }]
         transport_options = []
-        
         if len(activities) > 1:
-            transport_options.append("Public transit between attractions")
-        
+            transport_options.append({
+                "mode": "public_transit",
+                "from": activities[0].get("name", destination),
+                "to": activities[-1].get("name", destination),
+                "description": "Public transit between attractions"
+            })
         # Check for outdoor activities
         outdoor_activities = False
         for act in activities:
@@ -633,13 +1293,20 @@ class PlanningAgent:
                 if act.type == ActivityType.OUTDOOR:
                     outdoor_activities = True
                     break
-        
         if outdoor_activities:
-            transport_options.append("Walking for outdoor activities")
-        
+            transport_options.append({
+                "mode": "walking",
+                "from": activities[0].get("name", destination),
+                "to": activities[-1].get("name", destination),
+                "description": "Walking for outdoor activities"
+            })
         if not transport_options:
-            transport_options.append("Walking and public transit")
-        
+            transport_options.append({
+                "mode": "walking",
+                "from": destination,
+                "to": destination,
+                "description": "Walking and public transit"
+            })
         return transport_options
     
     def _generate_day_notes(self, day_date: date, activities: List[Dict[str, Any]], 
@@ -830,8 +1497,27 @@ class PlanningAgent:
                         duration_hours=act.get("duration_hours", 1),
                         cost=act.get("cost", 0)
                     ))
+                elif isinstance(act, str):
+                    # Handle string activities by creating a basic activity object
+                    location = Location(
+                        name=act,
+                        address="Address not available",
+                        latitude=None,
+                        longitude=None
+                    )
+                    
+                    activity_objects.append(Activity(
+                        name=act,
+                        description=f"Visit {act}",
+                        location=location,
+                        type="cultural",
+                        duration_hours=2,
+                        cost=0
+                    ))
                 else:
-                    activity_objects.append(act)
+                    # Skip invalid activities
+                    logger.warning(f"Skipping invalid activity: {act}")
+                    continue
             
             # Convert restaurants
             restaurant_objects = []
@@ -857,8 +1543,27 @@ class PlanningAgent:
                         rating=rest.get("rating", 4.0),
                         cost_per_person=rest.get("cost_per_person", 30.0)
                     ))
+                elif isinstance(rest, str):
+                    # Handle string restaurants by creating a basic restaurant object
+                    location = Location(
+                        name=rest,
+                        address="Address not available",
+                        latitude=None,
+                        longitude=None
+                    )
+                    
+                    restaurant_objects.append(Restaurant(
+                        name=rest,
+                        cuisine_type="Local",
+                        location=location,
+                        price_level=2,
+                        rating=4.0,
+                        cost_per_person=30.0
+                    ))
                 else:
-                    restaurant_objects.append(rest)
+                    # Skip invalid restaurants
+                    logger.warning(f"Skipping invalid restaurant: {rest}")
+                    continue
             
             # Get budget level
             budget_level = BudgetLevel.MODERATE

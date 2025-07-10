@@ -436,46 +436,140 @@
                 ` : ''}
             `;
             
-            // Display daily plans
+            // Display daily plans with improved route-based structure
             let dailyPlansHTML = '';
             if (itinerary.day_plans && Array.isArray(itinerary.day_plans)) {
                 itinerary.day_plans.forEach((day, index) => {
+                    // Get day type from the new structure
+                    const dayType = day.type || day.day_type || 'exploration';
+                    const dayNumber = day.day_number || (index + 1);
+                    const dayDate = day.date || 'Date TBD';
+                    const dayOfWeek = day.day_of_week || '';
+                    
+                    // Format activities
                     const activities = day.activities && Array.isArray(day.activities) 
-                        ? day.activities.map(act => act.name || act.title || 'Unknown Activity').join(', ')
+                        ? day.activities.map(act => {
+                            const name = act.name || act.title || 'Unknown Activity';
+                            const duration = act.duration_hours ? ` (${act.duration_hours}h)` : '';
+                            let location = '';
+                            if (act.location) {
+                                if (typeof act.location === 'string') {
+                                    location = ` at ${act.location}`;
+                                } else if (act.location.name) {
+                                    location = ` at ${act.location.name}`;
+                                } else if (act.location.address) {
+                                    location = ` at ${act.location.address}`;
+                                }
+                            }
+                            return `${name}${duration}${location}`;
+                        }).join('<br>• ')
                         : 'Free time';
                     
+                    // Format restaurants
                     const restaurants = day.restaurants && Array.isArray(day.restaurants)
                         ? day.restaurants.map(rest => rest.name || rest.title || 'Unknown Restaurant').join(', ')
                         : 'Flexible dining';
                     
+                    // Format accommodations
                     const accommodations = day.accommodations && Array.isArray(day.accommodations)
-                        ? day.accommodations.map(acc => acc.name || acc.title || 'Unknown Accommodation').join(', ')
+                        ? day.accommodations.map(acc => {
+                            const name = acc.name || acc.title || 'Unknown Accommodation';
+                            let location = '';
+                            if (acc.location) {
+                                if (typeof acc.location === 'string') {
+                                    location = ` in ${acc.location}`;
+                                } else if (acc.location.name) {
+                                    location = ` in ${acc.location.name}`;
+                                } else if (acc.location.address) {
+                                    location = ` in ${acc.location.address}`;
+                                }
+                            }
+                            const type = acc.type ? ` (${acc.type})` : '';
+                            return `${name}${location}${type}`;
+                        }).join('<br>• ')
                         : 'Accommodation to be arranged';
                     
+                    // Format transportation with better details
                     const transportation = day.transportation && Array.isArray(day.transportation)
-                        ? day.transportation.join(', ')
+                        ? day.transportation.map(trans => {
+                            const from = trans.from || 'Unknown';
+                            const to = trans.to || 'Unknown';
+                            const mode = trans.mode || 'transport';
+                            const duration = trans.duration_hours ? ` (${trans.duration_hours}h)` : '';
+                            const description = trans.description ? ` - ${trans.description}` : '';
+                            return `${mode}${duration}: ${from} → ${to}${description}`;
+                        }).join('<br>• ')
                         : 'Transportation to be arranged';
                     
                     const notes = day.notes || day.summary || '';
                     
-                    const dayType = day.day_type || 'regular';
-                    const dayTitle = dayType === 'departure' ? 'Departure Day' : 
-                                   dayType === 'return' ? 'Return Day' : 
-                                   `Day ${index + 1}`;
-                    const dayClass = dayType === 'departure' ? 'border-primary' : 
-                                   dayType === 'return' ? 'border-warning' : 
-                                   'border rounded';
+                    // Determine day title and styling based on type
+                    let dayTitle, dayClass, dayIcon;
+                    switch(dayType) {
+                        case 'departure':
+                            dayTitle = `🚗 Day ${dayNumber}: Departure`;
+                            dayClass = 'border-primary bg-light';
+                            dayIcon = 'fas fa-car text-primary';
+                            break;
+                        case 'travel':
+                            dayTitle = `🛣️ Day ${dayNumber}: Travel Day`;
+                            dayClass = 'border-info bg-light';
+                            dayIcon = 'fas fa-route text-info';
+                            break;
+                        case 'arrival':
+                            dayTitle = `🏁 Day ${dayNumber}: Arrival`;
+                            dayClass = 'border-success bg-light';
+                            dayIcon = 'fas fa-flag-checkered text-success';
+                            break;
+                        case 'return':
+                            dayTitle = `🏠 Day ${dayNumber}: Return`;
+                            dayClass = 'border-warning bg-light';
+                            dayIcon = 'fas fa-home text-warning';
+                            break;
+                        case 'exploration':
+                        default:
+                            dayTitle = `🗺️ Day ${dayNumber}: Exploration`;
+                            dayClass = 'border rounded';
+                            dayIcon = 'fas fa-map-marker-alt text-secondary';
+                            break;
+                    }
                     
                     dailyPlansHTML += `
                         <div class="itinerary-day mb-3 p-3 ${dayClass}">
-                            <h6 class="fw-bold ${dayType === 'departure' ? 'text-primary' : dayType === 'return' ? 'text-warning' : ''}">
-                                ${dayTitle}: ${day.date || 'Date TBD'}
-                            </h6>
-                            <p><strong>Activities:</strong> ${activities}</p>
-                            <p><strong>Restaurants:</strong> ${restaurants}</p>
-                            <p><strong>Accommodations:</strong> ${accommodations}</p>
-                            <p><strong>Transportation:</strong> ${transportation}</p>
-                            ${notes ? `<small class="text-muted">${notes}</small>` : ''}
+                            <div class="d-flex align-items-center mb-2">
+                                <i class="${dayIcon} me-2"></i>
+                                <h6 class="fw-bold mb-0">${dayTitle}</h6>
+                                <span class="ms-auto text-muted">${dayDate}${dayOfWeek ? ` (${dayOfWeek})` : ''}</span>
+                            </div>
+                            
+                            ${activities !== 'Free time' ? `
+                            <div class="mb-2">
+                                <strong><i class="fas fa-hiking me-1"></i>Activities:</strong><br>
+                                • ${activities}
+                            </div>
+                            ` : ''}
+                            
+                            ${restaurants !== 'Flexible dining' ? `
+                            <div class="mb-2">
+                                <strong><i class="fas fa-utensils me-1"></i>Restaurants:</strong> ${restaurants}
+                            </div>
+                            ` : ''}
+                            
+                            ${accommodations !== 'Accommodation to be arranged' ? `
+                            <div class="mb-2">
+                                <strong><i class="fas fa-bed me-1"></i>Accommodations:</strong><br>
+                                • ${accommodations}
+                            </div>
+                            ` : ''}
+                            
+                            ${transportation !== 'Transportation to be arranged' ? `
+                            <div class="mb-2">
+                                <strong><i class="fas fa-route me-1"></i>Transportation:</strong><br>
+                                • ${transportation}
+                            </div>
+                            ` : ''}
+                            
+                            ${notes ? `<div class="mt-2"><small class="text-muted"><i class="fas fa-info-circle me-1"></i>${notes}</small></div>` : ''}
                         </div>
                     `;
                 });

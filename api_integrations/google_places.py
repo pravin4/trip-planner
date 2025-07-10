@@ -9,9 +9,10 @@ logger = logging.getLogger(__name__)
 
 class GooglePlacesAPI:
     def __init__(self):
-        api_key = os.getenv("GOOGLE_PLACES_API_KEY")
+        """Initialize the Google Places API client."""
+        api_key = os.getenv("GOOGLE_MAPS_API_KEY")
         if not api_key:
-            raise ValueError("GOOGLE_PLACES_API_KEY environment variable is required")
+            raise ValueError("GOOGLE_MAPS_API_KEY environment variable is required")
         
         self.client = googlemaps.Client(key=api_key)
     
