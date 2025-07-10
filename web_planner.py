@@ -70,6 +70,12 @@ def plan_trip():
         if group_size <= 0:
             return jsonify({'error': 'Group size must be at least 1'}), 400
         
+        # Calculate trip duration for budget calculations
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        duration = (end_dt - start_dt).days + 1
+        daily_budget = budget / duration if duration > 0 else budget
+        
         # Create preferences
         preferences = {
             "accommodation_types": accommodation_types,
@@ -77,7 +83,9 @@ def plan_trip():
             "budget_level": budget_level,
             "group_size": group_size,
             "children": children,
-            "dietary_restrictions": dietary_restrictions
+            "dietary_restrictions": dietary_restrictions,
+            "max_daily_budget": daily_budget,
+            "total_budget": budget
         }
         
         # Create itinerary

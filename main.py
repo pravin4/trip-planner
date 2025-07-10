@@ -125,7 +125,7 @@ class SmartTravelPlanner:
         # If starting_point is different from destination and destination doesn't contain starting_point
         if (starting_point.lower() not in destination.lower() and 
             destination.lower() not in starting_point.lower() and
-            starting_point != "San Jose"):  # Only if starting_point was explicitly set
+            starting_point.lower() != destination.lower()):
             # This might be a route from starting_point to destination
             return {
                 "type": "route",
@@ -136,10 +136,10 @@ class SmartTravelPlanner:
             }
         
         # More aggressive route detection: if starting_point and destination are different cities
-        # and starting_point is not the default "San Jose", treat as route
-        if (starting_point != "San Jose" and 
-            starting_point.lower() != destination.lower() and
-            not any(city in destination.lower() for city in starting_point.lower().split())):
+        # and they're clearly different locations, treat as route
+        if (starting_point.lower() != destination.lower() and
+            not any(city in destination.lower() for city in starting_point.lower().split()) and
+            not any(city in starting_point.lower() for city in destination.lower().split())):
             return {
                 "type": "route",
                 "start": starting_point,
@@ -226,7 +226,7 @@ class SmartTravelPlanner:
                 logger.info(f"Journey planned: {journey_plan.get('travel_mode', 'unknown')} mode, {journey_plan.get('total_distance', 0):.1f} km")
                 
                 # For routes, pass the full route description to planning agent
-                planning_destination = destination  # Use the full route description
+                planning_destination = destination_info["route_description"]
             else:
                 # For single destinations, use the primary destination
                 planning_destination = destination_info["primary_destination"]
@@ -256,6 +256,9 @@ class SmartTravelPlanner:
             
             # Step 3: Create the itinerary
             logger.info("Step 3: Creating itinerary...")
+            logger.info(f"Destination info: {destination_info}")
+            logger.info(f"Planning destination: {planning_destination}")
+            
             itinerary = self.planning_agent.create_itinerary(
                 destination=planning_destination,
                 start_date=start_dt.isoformat() if hasattr(start_dt, "isoformat") else str(start_dt),

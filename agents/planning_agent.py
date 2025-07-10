@@ -132,23 +132,28 @@ class PlanningAgent:
             
             # Check if this is a route (e.g., "San Jose to Redwood National Park")
             is_route = self._is_route_destination(destination)
+            logger.info(f"Destination: '{destination}', Is route: {is_route}")
             
             if is_route:
                 # Parse route information
                 route_info = self._parse_route_destination(destination)
                 origin = route_info["origin"]
                 final_destination = route_info["destination"]
+                logger.info(f"Route detected: {origin} to {final_destination}")
                 
                 # Create route-based day plans
                 day_plans = self._create_route_day_plans(
                     origin, final_destination, start_date, end_date, 
                     research_data, preferences, duration
                 )
+                logger.info(f"Created {len(day_plans)} route-based day plans")
             else:
                 # Create destination-based day plans (existing logic)
+                logger.info(f"Creating destination-based day plans for: {destination}")
                 day_plans = self._create_destination_day_plans(
                     destination, start_date, end_date, research_data, preferences, duration
                 )
+                logger.info(f"Created {len(day_plans)} destination-based day plans")
             
             # Add date information to each day plan
             for i, day_plan in enumerate(day_plans):
@@ -1627,7 +1632,7 @@ class PlanningAgent:
                 "cost_breakdown": cost_breakdown,
                 "total_cost": total_cost,
                 "daily_average": total_cost / duration,
-                "budget_status": "within_budget" if total_cost <= preferences.get("max_daily_budget", 100) * duration else "over_budget"
+                "budget_status": "within_budget" if total_cost <= preferences.get("total_budget", total_cost) else "over_budget"
             }
             
             return PlanningState(**state_dict)
@@ -1646,7 +1651,7 @@ class PlanningAgent:
                 "destination": state.destination,
                 "start_date": state.start_date,
                 "end_date": state.end_date,
-                "total_budget": state.preferences.get("max_daily_budget", 100) * state.budget_analysis.get("daily_average", 0),
+                "total_budget": state.preferences.get("total_budget", 1000),
                 "preferences": state.preferences,
                 "day_plans": state.day_plans,
                 "total_cost": state.budget_analysis.get("total_cost", 0),
